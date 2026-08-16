@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dota-coach"
+version = "0.1.0"
+description = "Живой VAC-safe коуч Dota 2 на играх Immortal/про"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+    "numpy>=2.0.0",
+    "pydantic-settings>=2.4.0",
+]
+
+[project.scripts]
+dota-coach = "dota_coach.overlay.desktop:main"
+dota-coach-install = "dota_coach.gsi.install_cfg:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
