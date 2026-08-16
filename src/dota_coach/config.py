@@ -75,15 +75,25 @@ PARSE_SCRAPER_ID = os.getenv(
     "PARSE_SCRAPER_ID",
     "66214c1a-6b6f-423b-9d88-1a64261b7b38",
 )
+# Подписка Parse на opendota.com API (explorer/match) — fallback без OPENDOTA_API_KEY.
+OPENDOTA_PARSE_SCRAPER_ID = os.getenv(
+    "OPENDOTA_PARSE_SCRAPER_ID",
+    "842a36b5-bba8-420f-b477-bcba5896b5c9",
+)
 
 OPENDOTA_BASE = "https://api.opendota.com/api"
 OPENDOTA_API_KEY = os.getenv("OPENDOTA_API_KEY", "")
 # 80 = Immortal; 70–75 = Divine. League-матчи принимаются отдельно.
 OPENDOTA_MIN_RANK = int(os.getenv("OPENDOTA_MIN_RANK", "70"))
+# Паблики: целевой MMR (7000≈глубокий Immortal). OpenDota убрал avg_mmr —
+# на практике фильтруем Immortal (rank_tier/avg_rank_tier >= 80).
+OPENDOTA_MIN_MMR = int(os.getenv("OPENDOTA_MIN_MMR", "7000"))
 # Сколько дней назад брать матчи (по start_time). Для редких mid (LD/Io) нужно шире.
 OPENDOTA_MAX_AGE_DAYS = int(os.getenv("OPENDOTA_MAX_AGE_DAYS", "540"))
 OPENDOTA_REQUEST_GAP = float(os.getenv("OPENDOTA_REQUEST_GAP", "1.15"))
 OPENDOTA_PER_HERO_DEFAULT = int(os.getenv("OPENDOTA_PER_HERO", "400"))
+# Сколько страниц /publicMatches сканировать при сборе high-MMR пабликов.
+OPENDOTA_PUB_PAGES = int(os.getenv("OPENDOTA_PUB_PAGES", "120"))
 
 FARM_BENCHMARKS_PATH = PROCESSED_DIR / "farm_benchmarks.json"
 DEATH_BENCHMARKS_PATH = PROCESSED_DIR / "death_benchmarks.json"
@@ -92,7 +102,7 @@ ITEM_MODEL_PATH = MODELS_DIR / "item_mlp.npz"
 ITEM_VOCAB_PATH = MODELS_DIR / "item_vocab.json"
 PLAYER_ROWS_PATH = RAW_DIR / "player_rows.jsonl"
 
-APP_VERSION = os.getenv("DOTA_COACH_VERSION", "0.2.0")
+APP_VERSION = os.getenv("DOTA_COACH_VERSION", "0.2.2")
 GITHUB_REPO = os.getenv("DOTA_COACH_GITHUB_REPO", "")
 UPDATE_CHANNEL_PATH = DATA_DIR / "update_channel.json"
 VERSION_PATH = DATA_DIR / "version.json"

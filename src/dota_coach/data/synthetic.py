@@ -112,6 +112,7 @@ PROTRACKER_SNAPSHOT: dict[int, dict[str, Any]] = {
         "item_stats": [
             {"name": "item_bottle", "purchase_rate": 80.0, "avg_minute": 1.8, "price": 675},
             {"name": "item_magic_wand", "purchase_rate": 90.0, "avg_minute": 4.0, "price": 450},
+            {"name": "item_power_treads", "purchase_rate": 85.0, "avg_minute": 5.5, "price": 1400},
             {"name": "item_urn_of_shadows", "purchase_rate": 70.0, "avg_minute": 6.5, "price": 880},
             {"name": "item_spirit_vessel", "purchase_rate": 65.0, "avg_minute": 12.0, "price": 2780},
             {"name": "item_blink", "purchase_rate": 85.0, "avg_minute": 14.0, "price": 2250},

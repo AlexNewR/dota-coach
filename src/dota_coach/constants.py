@@ -340,11 +340,46 @@ ITEM_UPGRADES: dict[str, str] = {
 INVENTORY_SLOT_LIMIT = 6
 BOOT_LATE_MINUTE = 18
 
+# Ранний мусор / слабые слоты: в лейте продаём, чтобы влез новый айтем.
+EARLY_SELL_ITEMS: tuple[str, ...] = (
+    "magic_wand",
+    "null_talisman",
+    "bracer",
+    "wraith_band",
+    "orb_of_corrosion",
+    "soul_ring",
+)
+
+# Предпочтительные ботинки на миде (пока нет своей пары).
+HERO_PREFERRED_BOOTS: dict[int, str] = {
+    80: "power_treads",
+    107: "power_treads",
+    90: "arcane_boots",
+    91: "arcane_boots",
+}
+
 CONSUMABLE_PREFIXES = ("recipe_", "item_recipe_")
 CORE_PURCHASE_RATE = 45.0
 
 # Саппорт-слоты, которые D2PT тащит в общую таблицу Io. На миде их не советуем.
 HERO_SKIP_ITEMS: dict[int, set[str]] = {
+    80: {
+        # Caster-luxury с KotL/Io/ES — в OpenDota mid-LD их нет, NN иначе тащит кросс-героем.
+        "octarine_core",
+        "dagon",
+        "bottle",
+        "urn_of_shadows",
+        "spirit_vessel",
+        "aether_lens",
+        "sheepstick",
+        "kaya",
+        "kaya_and_sange",
+        "rod_of_atos",
+        "bloodstone",
+        "ethereal_blade",
+        "cyclone",
+        "wind_waker",
+    },
     91: {
         "urn_of_shadows",
         "spirit_vessel",
@@ -360,6 +395,31 @@ HERO_SKIP_ITEMS: dict[int, set[str]] = {
         "glimmer_cape",
     },
 }
+
+# Поздние luxury: не советуем как 1–2-й крупный слот / до типичной минуты.
+LATE_LUXURY_ITEMS: dict[str, int] = {
+    "octarine_core": 20,
+    "sheepstick": 26,
+    "refresher": 28,
+    "bloodthorn": 26,
+    "butterfly": 28,
+    "heart": 26,
+    "assault": 24,
+    "satanic": 28,
+    "abyssal_blade": 26,
+    "nullifier": 24,
+    "ethereal_blade": 22,
+    "overwhelming_blink": 28,
+    "arcane_blink": 28,
+    "wind_waker": 26,
+    "bloodstone": 22,
+    "skadi": 26,
+    "monkey_king_bar": 26,
+    "disperser": 26,
+    "silver_edge": 24,
+}
+
+MAJOR_ITEM_MIN_COST = 1400
 
 
 def normalize_item_name(raw: str | None) -> str:
@@ -422,11 +482,87 @@ def is_upgrade_of_owned(name: str, owned: set[str]) -> bool:
     return False
 
 
+def major_item_count(owned: set[str] | list[str]) -> int:
+    total = 0
+    for raw in owned:
+        key = normalize_item_name(raw)
+        if not key or not is_finished_item(key):
+            continue
+        if key == "aghanims_shard":
+            continue
+        if ITEM_COSTS.get(key, 0) >= MAJOR_ITEM_MIN_COST:
+            total += 1
+    return total
+
+
+def item_timing_ok(name: str, minute: int, owned: set[str] | list[str]) -> bool:
+    """Блокирует late luxury слишком рано / при пустом билде (все герои)."""
+    key = normalize_item_name(name)
+    if not key:
+        return False
+    have = {normalize_item_name(item) for item in owned}
+    have.discard("")
+    if is_upgrade_of_owned(key, have):
+        return True
+    majors = major_item_count(have)
+    min_minute = LATE_LUXURY_ITEMS.get(key)
+    if min_minute is not None:
+        if minute < min_minute and majors < 2:
+            return False
+        if minute < max(8, min_minute - 10) and majors < 1:
+            return False
+    cost = ITEM_COSTS.get(key, 0)
+    if cost >= 4000 and minute < 10 and majors < 1:
+        return False
+    return True
+
+
 def item_takes_inventory_slot(name: str) -> bool:
     key = normalize_item_name(name)
     if key in {"aghanims_shard"}:
         return False
     return True
+
+
+def inventory_sell_candidates(owned: set[str] | list[str]) -> list[str]:
+    """Низкоценные слоты, которые разумно продать под следующий крупный предмет."""
+    have = {normalize_item_name(item) for item in owned}
+    have.discard("")
+    return [key for key in EARLY_SELL_ITEMS if key in have]
+
+
+def can_consume_aghanims(owned: set[str] | list[str], scepter_consumed: bool = False) -> bool:
+    """Физический Aghanim's в сумке можно съесть и освободить слот."""
+    if scepter_consumed:
+        return False
+    have = {normalize_item_name(item) for item in owned}
+    return "ultimate_scepter" in have
+
+
+def can_free_inventory_slot(
+    owned: set[str] | list[str],
+    *,
+    scepter_consumed: bool = False,
+) -> bool:
+    return bool(inventory_sell_candidates(owned) or can_consume_aghanims(owned, scepter_consumed))
+
+
+def inventory_free_actions(
+    owned: set[str] | list[str],
+    *,
+    scepter_consumed: bool = False,
+) -> list[str]:
+    """Человекочитаемые действия: продать X / съесть Aghs."""
+    actions: list[str] = []
+    if can_consume_aghanims(owned, scepter_consumed):
+        actions.append(f"съешь {item_display('ultimate_scepter')}")
+    for key in inventory_sell_candidates(owned):
+        actions.append(f"продай {item_display(key)}")
+    return actions
+
+
+def preferred_boots_for_hero(hero_id: int) -> str:
+    return HERO_PREFERRED_BOOTS.get(int(hero_id) or 0, "power_treads")
 
 
 def item_display(name: str) -> str:

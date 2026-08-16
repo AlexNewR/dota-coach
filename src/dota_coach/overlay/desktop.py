@@ -8,7 +8,8 @@ import sys
 import threading
 import time
 import tkinter as tk
-from typing import Any
+from ctypes import wintypes
+from typing import Any, Callable
 
 BG = "#101218"
 PANEL = "#171b24"
@@ -21,9 +22,158 @@ HINT_BG = "#1d2330"
 FONT = "Segoe UI"
 MIN_W = 300
 MIN_H = 240
+
 VK_F8 = 0x77
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+LLKHF_UP = 0x80
+HC_ACTION = 0
+
+LRESULT = ctypes.c_ssize_t
+HHOOK = wintypes.HANDLE
 
 user32 = ctypes.windll.user32
+user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.SetWindowsHookExW.argtypes = (ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD)
+user32.SetWindowsHookExW.restype = HHOOK
+user32.CallNextHookEx.argtypes = (HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+user32.CallNextHookEx.restype = LRESULT
+user32.UnhookWindowsHookEx.argtypes = (HHOOK,)
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND, ctypes.c_uint, ctypes.c_uint)
+user32.TranslateMessage.argtypes = (ctypes.POINTER(wintypes.MSG),)
+user32.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
+user32.PeekMessageW.argtypes = (
+    ctypes.POINTER(wintypes.MSG),
+    wintypes.HWND,
+    ctypes.c_uint,
+    ctypes.c_uint,
+    ctypes.c_uint,
+)
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.PostThreadMessageW.argtypes = (wintypes.DWORD, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+user32.PostThreadMessageW.restype = wintypes.BOOL
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+LowLevelKeyboardProc = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+
+class F8HotkeyWatcher:
+    """Глобальный F8: LL-хук (основной) + GetAsyncKeyState (запасной).
+
+    RegisterHotKey Dota перехватывает. GetAsyncKeyState без restype на x64 даёт мусор.
+    LL-хук видит клавишу даже когда фокус у игры.
+    """
+
+    def __init__(self, on_edge: Callable[[], None]) -> None:
+        self._on_edge = on_edge
+        self._held = False
+        self._hook: int | None = None
+        self._proc: Any = None
+        self._thread: threading.Thread | None = None
+        self._win_tid = 0
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.hook_ok = False
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self.hook_ok = False
+        self._thread = threading.Thread(target=self._hook_loop, name="f8-llhook", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._win_tid:
+            try:
+                user32.PostThreadMessageW(self._win_tid, 0x0012, 0, 0)  # WM_QUIT
+            except Exception:
+                pass
+        if self._hook:
+            try:
+                user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+        self.hook_ok = False
+
+    def poll_async_fallback(self) -> None:
+        """Запасной edge-trigger, если хук не встал."""
+        if self.hook_ok:
+            return
+        down = bool(user32.GetAsyncKeyState(VK_F8) & 0x8000)
+        with self._lock:
+            if down and not self._held:
+                self._held = True
+                fire = True
+            elif not down:
+                self._held = False
+                fire = False
+            else:
+                fire = False
+        if fire:
+            self._on_edge()
+
+    def _fire(self) -> None:
+        try:
+            self._on_edge()
+        except Exception:
+            pass
+
+    def _callback(self, n_code: int, w_param: int, l_param: int) -> int:
+        if n_code == HC_ACTION:
+            info = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            if info.vkCode == VK_F8:
+                is_up = w_param in (WM_KEYUP, WM_SYSKEYUP) or bool(info.flags & LLKHF_UP)
+                fire = False
+                with self._lock:
+                    if is_up:
+                        self._held = False
+                    elif not self._held:
+                        self._held = True
+                        fire = True
+                if fire:
+                    self._fire()
+        return int(user32.CallNextHookEx(self._hook, n_code, w_param, l_param))
+
+    def _hook_loop(self) -> None:
+        self._win_tid = int(ctypes.windll.kernel32.GetCurrentThreadId())
+        self._proc = LowLevelKeyboardProc(self._callback)
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, None, 0)
+        if not self._hook:
+            self.hook_ok = False
+            return
+        self.hook_ok = True
+        msg = wintypes.MSG()
+        while not self._stop.is_set():
+            has = user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)  # PM_REMOVE
+            if has:
+                if msg.message == 0x0012:  # WM_QUIT
+                    break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            else:
+                time.sleep(0.01)
+        if self._hook:
+            user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+        self.hook_ok = False
 
 
 def _fmt_clock(seconds: int) -> str:
@@ -46,14 +196,45 @@ class CoachDesktop:
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
         self.visible = True
-        self._f8_held = False
         self._hint_visible = False
+        self._toggle_pending = False
+        self._hotkey_via_hook = False
         self._build()
-        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._hotkey = F8HotkeyWatcher(self._request_toggle)
+        self._hotkey.start()
+        # Даём хуку мгновение встать; если нет — fallback на GetAsyncKeyState.
+        self.root.after(80, self._check_hook)
         self.root.after(200, self._tick)
         self.root.after(40, self._poll_hotkey)
-        self.root.bind("<F8>", lambda _e: None)
+        self.root.bind("<F8>", self._on_tk_f8)
         self.root.focus_force()
+
+    def _on_close(self) -> None:
+        try:
+            self._hotkey.stop()
+        except Exception:
+            pass
+        self.root.destroy()
+
+    def _check_hook(self) -> None:
+        self._hotkey_via_hook = bool(self._hotkey.hook_ok)
+        if not self._hotkey_via_hook:
+            # Хук мог встать чуть позже — ещё одна проверка.
+            self.root.after(200, self._recheck_hook)
+
+    def _recheck_hook(self) -> None:
+        self._hotkey_via_hook = bool(self._hotkey.hook_ok)
+
+    def _request_toggle(self) -> None:
+        # Из хука / фолбэка — только флаг; toggle в главном потоке tk.
+        self._toggle_pending = True
+
+    def _on_tk_f8(self, _event: tk.Event | None = None) -> None:
+        # Когда фокус у окна коуча — хук тоже сработает; не дублируем.
+        if self._hotkey_via_hook:
+            return
+        self._request_toggle()
 
     def _label(self, parent: tk.Misc, **kwargs) -> tk.Label:
         kwargs.setdefault("bg", parent.cget("bg") if hasattr(parent, "cget") else BG)
@@ -69,7 +250,7 @@ class CoachDesktop:
         header.pack(fill="x", padx=12, pady=(12, 4))
         left = tk.Frame(header, bg=BG)
         left.pack(side="left", fill="x", expand=True)
-        self.eyebrow = self._label(left, text="DOTA2PROTRACKER · МИД", fg=GOLD, font=(FONT, 8, "bold"))
+        self.eyebrow = self._label(left, text="БИЛД · МИД", fg=GOLD, font=(FONT, 8, "bold"))
         self.eyebrow.pack(anchor="w")
         self.hero = self._label(left, text="Ожидание матча", font=(FONT, 14, "bold"))
         self.hero.pack(anchor="w")
@@ -82,7 +263,7 @@ class CoachDesktop:
         stats.pack(fill="x", padx=10, pady=8)
         self.stat_values: dict[str, tk.Label] = {}
         for col, (key, title) in enumerate(
-            (("kda", "K/D/A"), ("lh", "LH"), ("gpm", "GPM"), ("gold", "Всего"))
+            (("kda", "У/С/П"), ("lh", "Крипы"), ("gpm", "Золото/мин"), ("gold", "Золото"))
         ):
             cell = tk.Frame(stats, bg=PANEL, highlightthickness=0)
             cell.grid(row=0, column=col, sticky="nsew", padx=3, ipady=6)
@@ -127,11 +308,15 @@ class CoachDesktop:
             widget.configure(wraplength=wrap)
 
     def _poll_hotkey(self) -> None:
-        # Dota перехватывает RegisterHotKey; GetAsyncKeyState видит F8 даже без фокуса.
-        down = bool(user32.GetAsyncKeyState(VK_F8) & 0x8000)
-        if down and not self._f8_held:
+        if self._toggle_pending:
+            self._toggle_pending = False
             self.toggle()
-        self._f8_held = down
+        elif not self._hotkey_via_hook:
+            # Хук не встал — опрашиваем клавишу сами (с корректным restype).
+            self._hotkey.poll_async_fallback()
+            if self._toggle_pending:
+                self._toggle_pending = False
+                self.toggle()
         self.root.after(40, self._poll_hotkey)
 
     def toggle(self) -> None:
@@ -158,13 +343,13 @@ class CoachDesktop:
         if hero:
             self.hero.configure(text=hero)
             extra = f"id {data.get('hero_id')}" if data.get("hero_id") else ""
-            loading = " · качаю билд D2PT" if data.get("book_status") == "loading" else ""
+            loading = " · качаю билд" if data.get("book_status") == "loading" else ""
             self.detected.configure(text=f"Определён: {hero}" + (f" · {extra}" if extra else "") + loading)
         elif data.get("connected"):
             self.hero.configure(text="Герой ещё не пришёл" if data.get("in_game") else "Ожидание матча")
             self.detected.configure(text="")
         else:
-            self.hero.configure(text="Нет GSI")
+            self.hero.configure(text="Нет связи с игрой")
             self.detected.configure(text="")
         self.clock.configure(text=_fmt_clock(int(data.get("clock") or 0)))
 
@@ -183,14 +368,16 @@ class CoachDesktop:
         self.stat_values["lh"].configure(fg=lh_fg)
 
         if farm:
-            self.farm.configure(
-                text=(
-                    f"Фарм @{farm.get('minute', 0)}м: {farm.get('lh', 0)} LH · "
-                    f"про p25/p50 = {round(farm.get('lh_p25') or 0)}/{round(farm.get('lh_p50') or 0)}"
-                )
-            )
+            you_lh = int(data.get("last_hits") or farm.get("lh") or 0)
+            pro_lh = round(farm.get("lh_p50") or 0)
+            minute = farm.get("minute", 0)
+            if you_lh >= pro_lh:
+                pace = "на уровне про"
+            else:
+                pace = f"про обычно ~{pro_lh}"
+            self.farm.configure(text=f"К {minute} мин: у тебя {you_lh} крипов · {pace}")
         else:
-            self.farm.configure(text="Фарм: нет бенчмарка")
+            self.farm.configure(text="По крипам пока нет ориентира")
 
         enemies = ", ".join(str(row.get("name") or "") for row in (data.get("enemies") or []) if row.get("name"))
         self.matchup.configure(text=f"Против: {enemies}" if enemies else "Против: —")
@@ -202,7 +389,7 @@ class CoachDesktop:
             ok = [str(name) for name in items]
             bad = []
         self.items.configure(text="Предметы: " + (", ".join(str(name) for name in ok if name) or "—"))
-        self.items_bad.configure(text=("Плохой выбор: " + ", ".join(str(name) for name in bad if name)) if bad else "")
+        self.items_bad.configure(text=("Лучше не бери: " + ", ".join(str(name) for name in bad if name)) if bad else "")
 
         recs_list = data.get("recommended") or []
         if recs_list:
@@ -215,17 +402,43 @@ class CoachDesktop:
                     bits.append(f"{label} ({row['p']:.0%})")
                 else:
                     bits.append(str(label))
-            prefix = "Следующий предмет"
-            self.recs.configure(text=f"{prefix}: " + ", ".join(bits))
+            tip = str(data.get("inventory_tip") or "").strip()
+            text = "Следующий предмет: " + ", ".join(bits)
+            if tip:
+                text = f"{text} · {tip}"
+            self.recs.configure(text=text)
         else:
-            self.recs.configure(text="Рекомендация: —")
+            tip = str(data.get("inventory_tip") or "").strip()
+            self.recs.configure(text=tip if tip else "Пока без рекомендации по предмету")
 
+        enemies_rows = data.get("enemies") or []
+        counter_tips = [str(t).strip() for t in (data.get("counter_tips") or []) if str(t).strip()]
         counters = data.get("counters") or []
-        if counters:
-            bits = [f"{row.get('label')} ({row.get('enemy')})" for row in counters if row.get("label")]
-            self.counters.configure(text="Контр: " + ", ".join(bits), fg=OK)
+        if not counter_tips and counters:
+            # Старый снимок без counter_tips — собираем из reasons/labels.
+            for row in counters:
+                reason = str(row.get("reason") or "").strip()
+                label = str(row.get("label") or "").strip()
+                enemy = str(row.get("enemy") or "").strip()
+                if reason:
+                    counter_tips.append(reason)
+                elif label:
+                    counter_tips.append(f"{label} против {enemy}" if enemy else label)
+        if counter_tips:
+            self.counters.configure(
+                text="Против них: " + " · ".join(counter_tips[:3]),
+                fg=OK,
+            )
+        elif enemies_rows:
+            self.counters.configure(
+                text="Против этого драфта особых контр-предметов нет — бери обычный билд",
+                fg=MUTED,
+            )
         else:
-            self.counters.configure(text="Контр: —", fg=MUTED)
+            self.counters.configure(
+                text="Враги ещё не видны — контр-предметы появятся после драфта",
+                fg=MUTED,
+            )
 
         hint = data.get("hint")
         if hint and (hint.get("title") or hint.get("body")):
@@ -234,7 +447,11 @@ class CoachDesktop:
             self.hint_title.configure(text=hint.get("title") or "")
             self.hint_body.configure(text=hint.get("body") or "")
             instead = hint.get("instead") or ""
-            self.hint_instead.configure(text=f"Верный выбор: {instead}" if instead else "")
+            sev = str(hint.get("severity") or "")
+            if instead and sev in {"warn", "bad"}:
+                self.hint_instead.configure(text=f"Лучше так: {instead}")
+            else:
+                self.hint_instead.configure(text="")
             if not self._hint_visible:
                 self.hint.pack(fill="x", pady=8)
                 self._hint_visible = True

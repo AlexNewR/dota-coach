@@ -225,7 +225,7 @@ def _rules_for(hero_id: int) -> tuple[dict[str, str], dict[str, str]]:
     return prefer, avoid
 
 
-def analyze(state: GameState) -> dict[str, list[dict[str, object]]]:
+def analyze(state: GameState) -> dict[str, list[dict[str, object]] | list[str]]:
     enemies = [hid for hid in state.enemy_heroes if hid and hid != state.hero_id]
     owned = _owned(state)
     mistakes: list[CounterHit] = []
@@ -267,15 +267,47 @@ def analyze(state: GameState) -> dict[str, list[dict[str, object]]]:
             ],
         }
 
+    tip_hits = suggestions[:3]
+    tips: list[str] = []
+    for hit in tip_hits:
+        if hit.reason:
+            tips.append(hit.reason)
+        else:
+            tips.append(f"{item_display(hit.item)} против {hit.enemy}")
+    for hit in mistakes[:2]:
+        if hit.reason and hit.reason not in tips:
+            tips.append(f"Не бери: {hit.reason}")
+
     return {
         "enemies": [{"id": hid, "name": hero_display(hid)} for hid in enemies],
         "mistakes": [as_dict(hit) for hit in mistakes],
         "suggestions": [as_dict(hit) for hit in suggestions[:4]],
+        "tips": tips,
     }
 
 
-def mistake_for_purchase(state: GameState, new_items: set[str]) -> CounterHit | None:
+def avoided_items_for_state(state: GameState) -> set[str]:
+    """Предметы, которые контр-логика пометит как плохой выбор vs текущих врагов."""
+    bad: set[str] = set()
+    for hid in state.enemy_heroes:
+        if not hid or hid == state.hero_id:
+            continue
+        _, avoid = _rules_for(hid)
+        bad.update(avoid)
+    return bad
+
+
+def mistake_for_purchase(
+    state: GameState,
+    new_items: set[str],
+    *,
+    ignore_items: set[str] | None = None,
+) -> CounterHit | None:
     bought = {_canon(item) for item in new_items if item}
+    if not bought:
+        return None
+    skip = {_canon(item) for item in (ignore_items or set()) if item}
+    bought -= skip
     if not bought:
         return None
     for hid in state.enemy_heroes:

@@ -193,6 +193,111 @@ def check_gsi_normalize() -> None:
     assert 74 not in DEFAULT_HERO_IDS
     assert ItemModel(_Boom(), ItemVocab(["bottle"])).recommend(unknown) == []  # type: ignore[arg-type]
     print("OK: GSI normalize reads local player (flat + nested steamid).")
+    check_inventory_and_boots()
+
+
+def check_inventory_and_boots() -> None:
+    """Полный инвентарь + sell/consume; ES без ботинок → Power Treads."""
+    from dota_coach.constants import can_free_inventory_slot, inventory_free_actions
+    from dota_coach.models.items import _should_recommend, ensure_early_boots
+
+    # Consumed Aghs: флаг есть, слота нет.
+    consumed = {
+        "auth": {"token": "dota_coach_local"},
+        "map": {
+            "matchid": "aghs-check",
+            "clock_time": 40 * 60,
+            "game_time": 40 * 60 + 90,
+            "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+            "paused": False,
+        },
+        "player": {
+            "name": "Alex",
+            "team_name": "radiant",
+            "kills": 10,
+            "deaths": 3,
+            "assists": 12,
+            "last_hits": 180,
+            "denies": 5,
+            "gold": 5000,
+            "gpm": 550,
+            "xpm": 700,
+            "net_worth": 28000,
+        },
+        "hero": {
+            "id": 107,
+            "name": "npc_dota_hero_earth_spirit",
+            "level": 25,
+            "alive": True,
+            "aghanims_scepter": True,
+            "aghanims_shard": True,
+        },
+        "items": {
+            "slot0": {"name": "item_octarine_core"},
+            "slot1": {"name": "item_spirit_vessel"},
+            "slot2": {"name": "item_black_king_bar"},
+            "slot3": {"name": "item_shivas_guard"},
+            "slot4": {"name": "item_magic_wand"},
+            "slot5": {"name": "item_blink"},
+            "teleport0": {"name": "item_tpscroll"},
+        },
+    }
+    state = normalize_gsi(consumed)
+    assert state.scepter_consumed is True, state
+    assert state.has_scepter is True
+    assert state.inventory_slots == 6
+    assert "ultimate_scepter" in state.items
+    assert "aghanims_shard" in state.items
+    owned = set(state.items)
+    assert can_free_inventory_slot(owned, scepter_consumed=True)
+    actions = inventory_free_actions(owned, scepter_consumed=True)
+    assert any("Wand" in a or "wand" in a.lower() for a in actions), actions
+    assert _should_recommend("sheepstick", state, owned), "полный бэг + wand → можно советовать next"
+
+    # Физический Aghs в слоте — можно съесть.
+    physical = gsi_payload(
+        clock=35 * 60,
+        last_hits=160,
+        gold=4500,
+        deaths=2,
+        alive=True,
+        items=[
+            "octarine_core",
+            "ultimate_scepter",
+            "spirit_vessel",
+            "black_king_bar",
+            "shivas_guard",
+            "magic_wand",
+        ],
+        hero_id=107,
+        hero="npc_dota_hero_earth_spirit",
+    )
+    physical["hero"]["aghanims_scepter"] = True
+    bag = normalize_gsi(physical)
+    assert bag.scepter_consumed is False
+    assert bag.inventory_slots == 6
+    free = inventory_free_actions(bag.items, scepter_consumed=False)
+    assert any("Aghanim" in a for a in free), free
+    assert any("Wand" in a or "wand" in a.lower() for a in free), free
+
+    # ES mid без ботинок при почти полном инвентаре — PT не блокируется.
+    early = normalize_gsi(
+        gsi_payload(
+            clock=8 * 60,
+            last_hits=40,
+            gold=1600,
+            deaths=1,
+            alive=True,
+            items=["bottle", "magic_wand", "urn_of_shadows", "null_talisman", "bracer"],
+            hero_id=107,
+            hero="npc_dota_hero_earth_spirit",
+        )
+    )
+    assert early.inventory_slots == 5
+    assert _should_recommend("power_treads", early, set(early.items))
+    boots = ensure_early_boots([("blink", None), ("spirit_vessel", None)], early)
+    assert boots[0][0] == "power_treads", boots
+    print("OK: inventory sell/consume + ES Power Treads gates.")
 
 
 def main() -> None:

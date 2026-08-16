@@ -98,8 +98,12 @@ def _item_name(slot: Any) -> str:
     return normalize_item_name(str(data.get("name") or ""))
 
 
-def _collect_items(payload: dict[str, Any]) -> tuple[list[str], bool, int]:
-    """Инвентарь + рюкзак + стан. Третий элемент — занятые основные слоты 0–5."""
+def _collect_items(payload: dict[str, Any]) -> tuple[list[str], bool, int, bool]:
+    """Инвентарь + рюкзак + стан.
+
+    Возвращает: names, has_tp, inventory_slots (0–5), scepter_consumed.
+    Consumed Aghs/Shard попадают в names (уже куплены), но не занимают слот.
+    """
     node = payload.get("items")
     data = _as_dict(node)
     if _is_nested_gsi(data):
@@ -107,26 +111,38 @@ def _collect_items(payload: dict[str, Any]) -> tuple[list[str], bool, int]:
         blocks = _nested_blocks(node)
         data = blocks.get(slot, {}) if slot is not None else {}
     names: list[str] = []
+    inventory_names: list[str] = []
     has_tp = False
     inventory_slots = 0
     for key, slot in data.items():
         key_l = str(key).lower()
-        name = _item_name(slot)
-        if "teleport" in key_l or name == "tpscroll":
+        raw = str(_as_dict(slot).get("name") or "").strip().lower()
+        if raw.startswith("item_"):
+            raw = raw[5:]
+        if not raw or raw in {"empty", "unknown"}:
+            continue
+        if "teleport" in key_l or raw == "tpscroll":
             has_tp = True
             continue
-        if not name:
-            continue
-        if key_l.startswith("slot") and key_l[4:].isdigit() and int(key_l[4:]) <= 5:
+        is_main = key_l.startswith("slot") and key_l[4:].isdigit() and int(key_l[4:]) <= 5
+        # Занятый слот считаем даже для SKIP_ITEMS (branches и т.п.).
+        if is_main:
             inventory_slots += 1
-        if name not in names:
+        name = normalize_item_name(raw)
+        if name and name not in names:
             names.append(name)
+        if is_main and name and name not in inventory_names:
+            inventory_names.append(name)
     hero = _local_hero(payload, _local_player(payload))
-    if _truthy(hero.get("aghanims_shard")) and "aghanims_shard" not in names:
+    shard_flag = _truthy(hero.get("aghanims_shard"))
+    scepter_flag = _truthy(hero.get("aghanims_scepter"))
+    scepter_in_inventory = "ultimate_scepter" in inventory_names
+    scepter_consumed = bool(scepter_flag and not scepter_in_inventory)
+    if shard_flag and "aghanims_shard" not in names:
         names.append("aghanims_shard")
-    if _truthy(hero.get("aghanims_scepter")) and "ultimate_scepter" not in names:
+    if scepter_flag and "ultimate_scepter" not in names:
         names.append("ultimate_scepter")
-    return names, has_tp, inventory_slots
+    return names, has_tp, inventory_slots, scepter_consumed
 
 
 def _hero_id_from(hero: dict[str, Any]) -> int:
@@ -274,6 +290,7 @@ class GameState:
     inventory_slots: int = 0
     has_shard: bool = False
     has_scepter: bool = False
+    scepter_consumed: bool = False
     has_tp: bool = True
     xpos: int | None = None
     ypos: int | None = None
@@ -303,7 +320,7 @@ def normalize_gsi(payload: dict[str, Any]) -> GameState:
     mapping = _as_dict(payload.get("map"))
     player = _local_player(payload)
     hero = _local_hero(payload, player)
-    items, has_tp, inventory_slots = _collect_items(payload)
+    items, has_tp, inventory_slots, scepter_consumed = _collect_items(payload)
     game_state = str(mapping.get("game_state") or "")
     in_game = game_state in {
         "DOTA_GAMERULES_STATE_PRE_GAME",
@@ -324,6 +341,8 @@ def normalize_gsi(payload: dict[str, Any]) -> GameState:
     total_gold = net_worth if net_worth > 0 else int(gpm * elapsed / 60) if gpm > 0 else 0
     if net_worth <= 0:
         net_worth = total_gold
+    has_scepter = "ultimate_scepter" in items or _truthy(hero.get("aghanims_scepter"))
+    has_shard = "aghanims_shard" in items or _truthy(hero.get("aghanims_shard"))
     return GameState(
         match_id=str(mapping.get("matchid") or ""),
         clock_time=clock_time,
@@ -353,8 +372,9 @@ def normalize_gsi(payload: dict[str, Any]) -> GameState:
         buyback_cooldown=int(hero.get("buyback_cooldown") or 0),
         items=items,
         inventory_slots=inventory_slots,
-        has_shard="aghanims_shard" in items,
-        has_scepter="ultimate_scepter" in items,
+        has_shard=has_shard,
+        has_scepter=has_scepter,
+        scepter_consumed=scepter_consumed,
         has_tp=has_tp or "tpscroll" in items,
         xpos=int(xpos) if isinstance(xpos, int) else None,
         ypos=int(ypos) if isinstance(ypos, int) else None,

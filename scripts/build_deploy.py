@@ -112,10 +112,20 @@ def build() -> Path:
         str(ROOT / "src"),
         "--console",
         "--noupx",
+        "--collect-all",
+        "numpy",
         "--collect-submodules",
         "uvicorn",
         "--collect-submodules",
         "fastapi",
+        "--hidden-import",
+        "numpy",
+        "--hidden-import",
+        "numpy._core",
+        "--hidden-import",
+        "numpy._core._multiarray_umath",
+        "--hidden-import",
+        "numpy.core._multiarray_umath",
         "--hidden-import",
         "uvicorn.logging",
         "--hidden-import",
@@ -133,6 +143,11 @@ def build() -> Path:
     app_dir = DIST / APP_NAME
     if not (app_dir / f"{APP_NAME}.exe").exists():
         raise RuntimeError(f"PyInstaller не создал {app_dir / APP_NAME}.exe")
+    # Проверка: без этого .pyd exe падает на чужом ПК
+    umath = list(app_dir.rglob("_multiarray_umath*.pyd"))
+    if not umath:
+        raise RuntimeError("В сборке нет numpy._core._multiarray_umath — PyInstaller недособрал numpy")
+    print(f"numpy umath: {umath[0].relative_to(app_dir)}", flush=True)
     # На всякий случай продублируем data рядом с exe (ROOT = папка exe)
     _copy_runtime_data(app_dir)
     (app_dir / "ЗАПУСК.bat").write_text(BAT, encoding="utf-8")

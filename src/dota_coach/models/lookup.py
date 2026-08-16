@@ -8,7 +8,7 @@ from typing import Any
 from dota_coach.config import DEFAULT_LANE_ROLE, ITEM_LOOKUP_PATH
 from dota_coach.constants import normalize_item_name
 from dota_coach.gsi.normalize import GameState
-from dota_coach.models.items import _should_recommend
+from dota_coach.models.items import _should_recommend, ensure_early_boots
 
 
 def _bucket(minute: int) -> int:
@@ -75,6 +75,9 @@ class ItemLookup:
                 for item in row["items"]
                 if _should_recommend(item["name"], state, owned)
             ]
-            if names:
-                return names[:top_k]
-        return []
+            pairs = ensure_early_boots([(n, None) for n in names], state, top_k=top_k)
+            if pairs:
+                return [name for name, _ in pairs]
+        # Нет частотных айтемов в бакете — всё равно попробуем ботинки.
+        pairs = ensure_early_boots([], state, top_k=top_k)
+        return [name for name, _ in pairs]

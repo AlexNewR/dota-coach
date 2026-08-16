@@ -19,12 +19,17 @@ from dota_coach.constants import (
     BOOT_LATE_MINUTE,
     INVENTORY_SLOT_LIMIT,
     ITEM_COSTS,
+    LATE_LUXURY_ITEMS,
+    can_free_inventory_slot,
     is_finished_item,
     is_upgrade_of_owned,
     item_allowed_for_hero,
     item_takes_inventory_slot,
+    item_timing_ok,
+    major_item_count,
     normalize_item_name,
     owned_boots,
+    preferred_boots_for_hero,
 )
 from dota_coach.gsi.normalize import GameState
 
@@ -110,6 +115,17 @@ def feature_vector(
     return np.concatenate([hero, role_vec, numeric, items, enemies])
 
 
+def _label_ok_for_training(name: str, minute: int, owned: list[str], hero_id: int) -> bool:
+    """Режет мусорные лейблы: luxury первым слотом, чужие предметы герою."""
+    if not name or not item_allowed_for_hero(hero_id, name):
+        return False
+    if not item_timing_ok(name, minute, owned):
+        return False
+    if name in LATE_LUXURY_ITEMS and major_item_count(owned) < 1 and minute < 18:
+        return False
+    return True
+
+
 def build_dataset(rows: list[dict[str, Any]], vocab: ItemVocab) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Возвращает X, y, match_ids (для split по матчу)."""
     xs: list[np.ndarray] = []
@@ -130,6 +146,10 @@ def build_dataset(rows: list[dict[str, Any]], vocab: ItemVocab) -> tuple[np.ndar
             if label is None:
                 continue
             minute = max(0, int(event.get("time") or 0) // 60)
+            if not _label_ok_for_training(name, minute, owned, hero_id):
+                # Предмет всё равно в owned (как в матче), но не как цель обучения.
+                owned.append(name)
+                continue
             gold = float(gold_t[minute]) if minute < len(gold_t) else float(ITEM_COSTS.get(name, 2000))
             net_worth = gold
             level = min(25.0, 1 + minute * 0.7)
@@ -309,6 +329,9 @@ def _inventory_used(state: GameState, owned: set[str]) -> int:
     if slots > 0:
         return slots
     counted = [name for name in owned if name and name != "aghanims_shard"]
+    # Consumed Aghs уже в owned, но слот не занимает.
+    if getattr(state, "scepter_consumed", False):
+        counted = [name for name in counted if name != "ultimate_scepter"]
     return min(len(counted), INVENTORY_SLOT_LIMIT)
 
 
@@ -318,18 +341,52 @@ def _should_recommend(name: str, state: GameState, owned: set[str]) -> bool:
         return False
     if not is_finished_item(key) or not item_allowed_for_hero(state.hero_id, key):
         return False
+    if not item_timing_ok(key, state.minute, owned):
+        return False
+    try:
+        from dota_coach.coach.counters import avoided_items_for_state
+
+        if key in avoided_items_for_state(state):
+            return False
+    except Exception:
+        pass
     boots = owned_boots(owned)
     slots = _inventory_used(state, owned)
+    scepter_consumed = bool(getattr(state, "scepter_consumed", False))
     if key in BOOT_ITEMS:
         if boots:
             return key == "travel_boots_2" and "travel_boots" in boots
-        if slots >= 5:
-            return False
+        # Первые ботинки — всегда ок (можно продать мусор / переставить слоты).
+        # Раньше slots>=5 блокировал PT у ES с bottle+wand+urn.
         if state.minute >= BOOT_LATE_MINUTE and key not in {"travel_boots", "travel_boots_2"}:
             return False
     if slots >= INVENTORY_SLOT_LIMIT and item_takes_inventory_slot(key):
-        return is_upgrade_of_owned(key, owned)
+        if is_upgrade_of_owned(key, owned):
+            return True
+        # Полный инвентарь: советуем следующий слот, если есть что продать / съесть Aghs.
+        return can_free_inventory_slot(owned, scepter_consumed=scepter_consumed)
     return True
+
+
+def ensure_early_boots(
+    pairs: list[tuple[str, float | None]],
+    state: GameState,
+    top_k: int = 3,
+) -> list[tuple[str, float | None]]:
+    """Если нет ботинок — гарантируем preferred boots в ранней рекомендации."""
+    owned = {normalize_item_name(item) for item in state.items}
+    owned.discard("")
+    if owned_boots(owned) or state.minute >= BOOT_LATE_MINUTE:
+        return pairs[:top_k]
+    preferred = preferred_boots_for_hero(state.hero_id)
+    if not _should_recommend(preferred, state, owned):
+        return pairs[:top_k]
+    if any(normalize_item_name(name) == preferred for name, _ in pairs):
+        return pairs[:top_k]
+    boot_pair: tuple[str, float | None] = (preferred, None)
+    if pairs and pairs[0][1] is not None:
+        boot_pair = (preferred, max(0.12, float(pairs[0][1])))
+    return [boot_pair, *[(n, p) for n, p in pairs if normalize_item_name(n) != preferred]][:top_k]
 
 
 class ItemModel:
@@ -366,7 +423,7 @@ class ItemModel:
             ranked.append((name, float(probs[int(idx)])))
             if len(ranked) >= top_k:
                 break
-        return ranked
+        return ensure_early_boots(ranked, state, top_k=top_k)  # type: ignore[return-value]
 
 
 def train_item_model(rows: list[dict[str, Any]]) -> tuple[ItemModel, dict[str, Any]]:

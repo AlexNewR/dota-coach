@@ -16,7 +16,12 @@ def train_all(
 ) -> dict[str, int | str | float | None]:
     ensure_data_dirs()
     all_rows = load_player_rows()
-    od_rows = [row for row in all_rows if str(row.get("source") or "") == "opendota"]
+    # Explorer/pro + high-MMR pubs (source=opendota / opendota_pub).
+    od_rows = [
+        row
+        for row in all_rows
+        if str(row.get("source") or "").startswith("opendota")
+    ]
     train_rows = od_rows
     if len(od_rows) < min_opendota_rows:
         if not allow_synthetic_nn:
@@ -25,7 +30,7 @@ def train_all(
                 "Сначала: python scripts\\collect_data.py --opendota-primary --per-hero 400 --max-age-days 540"
             )
         train_rows = all_rows if all_rows else synthetic_dataset(load_protracker_heroes())
-    # Farm/death/lookup: OpenDota + при необходимости синтетика для покрытия
+    # Farm/death/lookup: OpenDota (+pubs) + при необходимости синтетика для покрытия
     bench_rows = list(od_rows) if od_rows else list(train_rows)
     if len(bench_rows) < 80:
         bench_rows.extend(synthetic_dataset(load_protracker_heroes()))
