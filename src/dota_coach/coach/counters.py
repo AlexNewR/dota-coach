@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from dota_coach.constants import hero_display, item_display, normalize_item_name
+from dota_coach.constants import hero_display, item_allowed_for_hero, item_display, normalize_item_name
 from dota_coach.gsi.normalize import GameState
 
 # Апгрейды считают как базовый контр-предмет.
@@ -235,7 +235,11 @@ def analyze(state: GameState) -> dict[str, list[dict[str, object]] | list[str]]:
     for hid in enemies:
         prefer, avoid = _rules_for(hid)
         enemy = hero_display(hid)
-        instead = tuple(item for item in prefer if _canon(item) not in owned)[:3]
+        instead = tuple(
+            item
+            for item in prefer
+            if _canon(item) not in owned and item_allowed_for_hero(state.hero_id, item)
+        )[:3]
         for item, reason in avoid.items():
             if item in owned or _canon(item) in owned:
                 mistakes.append(
@@ -244,11 +248,18 @@ def analyze(state: GameState) -> dict[str, list[dict[str, object]] | list[str]]:
                         enemy_id=hid,
                         enemy=enemy,
                         reason=reason,
-                        instead=instead or tuple(prefer.keys())[:3],
+                        instead=instead
+                        or tuple(
+                            name
+                            for name in prefer
+                            if item_allowed_for_hero(state.hero_id, name)
+                        )[:3],
                     )
                 )
         for item, reason in prefer.items():
             if _canon(item) in owned or item in seen_suggest:
+                continue
+            if not item_allowed_for_hero(state.hero_id, item):
                 continue
             seen_suggest.add(item)
             suggestions.append(
@@ -315,7 +326,9 @@ def mistake_for_purchase(
             continue
         prefer, avoid = _rules_for(hid)
         enemy = hero_display(hid)
-        instead = tuple(prefer.keys())[:3]
+        instead = tuple(
+            name for name in prefer if item_allowed_for_hero(state.hero_id, name)
+        )[:3]
         for item in bought:
             if item in avoid:
                 return CounterHit(

@@ -20,6 +20,7 @@ from dota_coach.constants import (
     INVENTORY_SLOT_LIMIT,
     ITEM_COSTS,
     LATE_LUXURY_ITEMS,
+    MID_SKIP_ITEMS,
     can_free_inventory_slot,
     is_finished_item,
     is_upgrade_of_owned,
@@ -70,10 +71,10 @@ def build_vocab(rows: list[dict[str, Any]], min_count: int = 3) -> ItemVocab:
     names = [
         name
         for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        if count >= min_count and is_finished_item(name)
+        if count >= min_count and is_finished_item(name) and name not in MID_SKIP_ITEMS
     ]
     if not names:
-        names = sorted(ITEM_COSTS)
+        names = sorted(k for k in ITEM_COSTS if k not in MID_SKIP_ITEMS)
     return ItemVocab(names)
 
 
@@ -150,8 +151,8 @@ def build_dataset(rows: list[dict[str, Any]], vocab: ItemVocab) -> tuple[np.ndar
                 # Предмет всё равно в owned (как в матче), но не как цель обучения.
                 owned.append(name)
                 continue
-            gold = float(gold_t[minute]) if minute < len(gold_t) else float(ITEM_COSTS.get(name, 2000))
-            net_worth = gold
+            gold = float(gold_t[minute]) if minute < len(gold_t) else float(gold_t[-1] if gold_t else ITEM_COSTS.get(name, 2000) + minute * 400)
+            net_worth = float(row.get("net_worth") or gold)
             level = min(25.0, 1 + minute * 0.7)
             xs.append(
                 feature_vector(hero_id, role, minute, gold, net_worth, level, owned, enemies, vocab)
@@ -373,7 +374,7 @@ def ensure_early_boots(
     state: GameState,
     top_k: int = 3,
 ) -> list[tuple[str, float | None]]:
-    """Если нет ботинок — гарантируем preferred boots в ранней рекомендации."""
+    """Если нет ботинок — preferred boots всегда первыми в ранней рекомендации."""
     owned = {normalize_item_name(item) for item in state.items}
     owned.discard("")
     if owned_boots(owned) or state.minute >= BOOT_LATE_MINUTE:
@@ -381,12 +382,15 @@ def ensure_early_boots(
     preferred = preferred_boots_for_hero(state.hero_id)
     if not _should_recommend(preferred, state, owned):
         return pairs[:top_k]
-    if any(normalize_item_name(name) == preferred for name, _ in pairs):
-        return pairs[:top_k]
-    boot_pair: tuple[str, float | None] = (preferred, None)
-    if pairs and pairs[0][1] is not None:
-        boot_pair = (preferred, max(0.12, float(pairs[0][1])))
-    return [boot_pair, *[(n, p) for n, p in pairs if normalize_item_name(n) != preferred]][:top_k]
+    rest = [(n, p) for n, p in pairs if normalize_item_name(n) != preferred]
+    existing = next(((n, p) for n, p in pairs if normalize_item_name(n) == preferred), None)
+    if existing is not None:
+        boot_pair = existing
+    else:
+        boot_pair = (preferred, None)
+        if pairs and pairs[0][1] is not None:
+            boot_pair = (preferred, max(0.12, float(pairs[0][1])))
+    return [boot_pair, *rest][:top_k]
 
 
 class ItemModel:
@@ -397,28 +401,35 @@ class ItemModel:
     def recommend(self, state: GameState, role: int = DEFAULT_LANE_ROLE, top_k: int = 3) -> list[tuple[str, float]]:
         if state.hero_id not in DEFAULT_HERO_IDS:
             return []
-        gold = float(state.earned_gold or state.net_worth or state.gold)
+        # Выравниваем с gold_t из обучающей выборки: общее заработанное золото / networth.
+        # В GSI state.earned_gold / state.net_worth / total_gold отражают суммарное золото,
+        # в отличие от state.gold (карманное золото).
+        total_gold = float(
+            state.earned_gold
+            or state.net_worth
+            or state.total_gold
+            or (state.gpm * max(1, state.minute) if state.gpm > 0 else 0)
+            or state.gold
+        )
+        net_worth = float(state.net_worth or total_gold)
+        level = float(state.level or max(1, min(25, int(1 + state.minute * 0.7))))
         x = feature_vector(
             state.hero_id,
             role,
             state.minute,
-            gold,
-            float(state.net_worth or gold),
-            float(state.level or max(1, state.minute)),
+            total_gold,
+            net_worth,
+            level,
             state.items,
             state.enemy_heroes,
             self.vocab,
         )
         probs = self.mlp.predict_proba(x)[0]
         owned = {normalize_item_name(item) for item in state.items}
-        bag = float(state.gold)
         ranked: list[tuple[str, float]] = []
         for idx in np.argsort(probs)[::-1]:
             name = self.vocab.names[int(idx)]
             if not _should_recommend(name, state, owned):
-                continue
-            cost = ITEM_COSTS.get(name, 2500)
-            if bag > 0 and bag < cost * ITEM_HINT_GOLD_RATIO * 0.55 and state.minute >= 6:
                 continue
             ranked.append((name, float(probs[int(idx)])))
             if len(ranked) >= top_k:

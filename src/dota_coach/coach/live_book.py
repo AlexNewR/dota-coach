@@ -14,14 +14,15 @@ from dota_coach.models.lookup import ItemLookup, build_item_lookup
 class LiveHeroBook:
     """Подгружает mid-статы D2PT для героя, которого GSI только что увидел."""
 
-    def __init__(self) -> None:
+    def __init__(self, lock: threading.RLock | None = None) -> None:
         self._ready: set[int] = set()
         self._pending: set[int] = set()
-        self._lock = threading.Lock()
+        self._lock = lock if lock is not None else threading.RLock()
         self.status: dict[int, str] = {}
 
     def knows(self, hero_id: int, farm: FarmBenchmarks) -> bool:
-        return farm.lookup(hero_id, 8) is not None or hero_id in self._ready
+        with self._lock:
+            return farm.lookup(hero_id, 8) is not None or hero_id in self._ready
 
     def ensure(
         self,
@@ -61,10 +62,13 @@ class LiveHeroBook:
             html = fetch_hero_page(name, role="Mid")
             hero = parse_hero_html(html, hero_id, name)
             rows = rows_from_hero_stats(hero, copies=24)
-            farm.table.update(build_farm_benchmarks(rows))
-            deaths.table.update(build_death_benchmarks(rows))
-            lookup.table.update(build_item_lookup(rows))
+            new_farm = build_farm_benchmarks(rows)
+            new_deaths = build_death_benchmarks(rows)
+            new_lookup = build_item_lookup(rows)
             with self._lock:
+                farm.table.update(new_farm)
+                deaths.table.update(new_deaths)
+                lookup.table.update(new_lookup)
                 self._ready.add(hero_id)
                 self.status[hero_id] = "ready"
         except Exception as exc:  # noqa: BLE001

@@ -166,15 +166,19 @@ def match_mmr_ok(match: dict[str, Any], min_mmr: int | None = None) -> bool:
     if threshold <= 0:
         return True
     avg = match_avg_mmr(match)
-    if avg is not None:
-        # computed_mmr иногда занижен относительно Immortal — не режем по нему вниз,
-        # если лобби уже Immortal.
-        if avg >= threshold:
-            return True
+    if avg is not None and avg >= threshold:
+        return True
     rank = match_avg_rank_tier(match)
-    if rank is None:
-        return avg is not None and avg >= threshold
-    return rank >= mmr_request_to_min_rank(threshold)
+    need = mmr_request_to_min_rank(threshold)
+    if rank is not None and rank >= need:
+        return True
+    players = match.get("players") or []
+    if any(int(p.get("rank_tier") or 0) >= need for p in players):
+        return True
+    # OpenDota: /publicMatches?min_rank=80 часто отдаёт avg_rank_tier~75.
+    if threshold >= 7000 and rank is not None and rank >= 75:
+        return True
+    return False
 
 
 def player_rank_ok(
@@ -295,12 +299,19 @@ def _save_match(match_id: int, match: dict[str, Any]) -> None:
     ensure_data_dirs()
     (MATCH_CACHE / f"{match_id}.json").write_text(json.dumps(match), encoding="utf-8")
 
-def fetch_match(match_id: int, use_cache: bool = True, retries: int = 3) -> dict[str, Any] | None:
+def fetch_match(
+    match_id: int,
+    use_cache: bool = True,
+    retries: int = 3,
+    allow_parse: bool = True,
+) -> dict[str, Any] | None:
     if use_cache:
         cached = _cached_match(match_id)
         if cached is not None:
             return cached
-    prefer_parse = bool(PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not OPENDOTA_API_KEY)
+    prefer_parse = bool(
+        allow_parse and PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not OPENDOTA_API_KEY
+    )
     if prefer_parse:
         try:
             match = parse_opendota_get("get_match", {"match_id": int(match_id)})
@@ -322,7 +333,7 @@ def fetch_match(match_id: int, use_cache: bool = True, retries: int = 3) -> dict
             if "daily api limit" in str(exc).lower():
                 break
             time.sleep(OPENDOTA_REQUEST_GAP * (attempt + 2))
-    if PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not prefer_parse:
+    if allow_parse and PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not prefer_parse:
         try:
             match = parse_opendota_get("get_match", {"match_id": int(match_id)})
             if isinstance(match, dict) and match.get("match_id"):
@@ -657,39 +668,61 @@ def _hero_high_mmr_pub_ids_explorer(
     lane_role: int,
     min_mmr: int,
 ) -> list[tuple[int, int]]:
-    """Immortal/high pub mid через explorer. (match_id, avg_rank_tier)."""
-    out: list[tuple[int, int]] = []
-    seen: set[int] = set()
-    page = 100
-    offset = 0
-    min_tier = mmr_request_to_min_rank(min_mmr)
-    while len(out) < limit:
-        batch = min(page, limit - len(out))
-        sql = (
-            "SELECT player_matches.match_id, public_matches.avg_rank_tier "
-            "FROM player_matches "
-            "JOIN public_matches ON player_matches.match_id = public_matches.match_id "
-            f"WHERE player_matches.hero_id = {int(hero_id)} "
-            f"AND player_matches.lane_role = {int(lane_role)} "
-            f"AND public_matches.avg_rank_tier >= {int(min_tier)} "
-            f"AND public_matches.start_time >= {int(since)} "
-            "ORDER BY public_matches.match_id DESC "
-            f"LIMIT {batch} OFFSET {offset}"
-        )
-        rows = _explorer_rows(sql)
-        if not rows:
-            break
-        for row in rows:
-            mid = int(row.get("match_id") or 0)
-            tier = int(float(row.get("avg_rank_tier") or 0))
-            if mid and mid not in seen:
-                seen.add(mid)
-                out.append((mid, tier))
-        offset += len(rows)
-        if len(rows) < batch:
-            break
-        _gap(0.8)
-    return out[:limit]
+    """High pub mid через explorer. (match_id, avg_rank_tier).
+
+    Immortal (80+) в таблице public_matches часто пусто — тогда Divine 5 (75).
+    """
+    wanted = mmr_request_to_min_rank(min_mmr)
+    # 75 = Divine 5: максимум, что обычно есть в explorer public_matches.
+    tier_candidates = [wanted]
+    if wanted > 75:
+        tier_candidates.append(75)
+    if wanted > 70:
+        tier_candidates.append(70)
+
+    for min_tier in tier_candidates:
+        out: list[tuple[int, int]] = []
+        seen: set[int] = set()
+        page = 100
+        offset = 0
+        while len(out) < limit:
+            batch = min(page, limit - len(out))
+            sql = (
+                "SELECT player_matches.match_id, public_matches.avg_rank_tier "
+                "FROM player_matches "
+                "JOIN public_matches ON player_matches.match_id = public_matches.match_id "
+                "JOIN matches ON matches.match_id = player_matches.match_id "
+                f"WHERE player_matches.hero_id = {int(hero_id)} "
+                f"AND player_matches.lane_role = {int(lane_role)} "
+                f"AND public_matches.avg_rank_tier >= {int(min_tier)} "
+                f"AND public_matches.start_time >= {int(since)} "
+                "AND (matches.leagueid IS NULL OR matches.leagueid = 0) "
+                "AND matches.lobby_type IN (0, 7) "
+                "ORDER BY public_matches.match_id DESC "
+                f"LIMIT {batch} OFFSET {offset}"
+            )
+            rows = _explorer_rows(sql)
+            if not rows:
+                break
+            for row in rows:
+                mid = int(row.get("match_id") or 0)
+                tier = int(float(row.get("avg_rank_tier") or 0))
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    out.append((mid, tier))
+            offset += len(rows)
+            if len(rows) < batch:
+                break
+            _gap(0.4)
+        if out:
+            if min_tier < wanted:
+                print(
+                    f"OpenDota pubs explorer hero {hero_id}: "
+                    f"fallback avg_rank_tier>={min_tier} (wanted >={wanted})",
+                    flush=True,
+                )
+            return out[:limit]
+    return []
 
 
 def scan_high_mmr_public_match_ids(
@@ -741,11 +774,11 @@ def scan_high_mmr_public_match_ids(
                 continue
             tier = _public_row_rank_tier(row)
             avg = _public_row_mmr(row)
-            if avg is not None:
-                if avg < mmr_floor:
+            # Endpoint уже отфильтрован min_rank; avg_rank_tier часто <80 даже в Immortal-пуле.
+            if avg is not None and avg < mmr_floor:
+                # Явный MMR ниже порога — отбрасываем.
+                if tier is None or tier < rank_floor:
                     continue
-            elif tier is None or tier < rank_floor:
-                continue
             if not (_public_summary_heroes(row) & wanted):
                 continue
             if mid in seen:
@@ -802,12 +835,14 @@ def collect_high_mmr_pubs(
         flush=True,
     )
     known_rank: dict[int, int] = {}
-    # Explorer без API-ключа почти всегда 429 — сразу /publicMatches.
-    if OPENDOTA_API_KEY:
+    use_explorer = bool(OPENDOTA_API_KEY or (PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID))
+    if use_explorer:
+        via = "opendota" if OPENDOTA_API_KEY else "parse"
+        print(f"OpenDota pubs: explorer via {via}…", flush=True)
         for hero_id in hero_ids:
             found = _hero_high_mmr_pub_ids_explorer(
                 hero_id,
-                limit=per_hero + 80,
+                limit=min(per_hero + 80, 50),
                 since=since,
                 lane_role=lane_role,
                 min_mmr=mmr_floor,
@@ -819,11 +854,11 @@ def collect_high_mmr_pubs(
                 if mid not in seen_matches:
                     seen_matches.add(mid)
                     match_ids.append(mid)
-            _gap(0.5)
+            _gap(0.3)
     else:
-        print("OpenDota pubs: no API key — skip explorer, use /publicMatches", flush=True)
+        print("OpenDota pubs: no API key / Parse — skip explorer, use /publicMatches", flush=True)
 
-    if (OPENDOTA_API_KEY and len(match_ids) < max(40, per_hero // 2)) or not OPENDOTA_API_KEY:
+    if not match_ids:
         scanned = scan_high_mmr_public_match_ids(
             hero_ids=hero_ids,
             min_mmr=mmr_floor,
@@ -835,8 +870,27 @@ def collect_high_mmr_pubs(
             if mid not in seen_matches:
                 seen_matches.add(mid)
                 match_ids.append(mid)
+    elif len(match_ids) < 30:
+        print(
+            f"OpenDota pubs: have {len(match_ids)} explorer ids — skip /publicMatches "
+            "(avoid daily limit)",
+            flush=True,
+        )
 
     match_ids = sorted(match_ids, key=lambda mid: 0 if _cached_match(mid) is not None else 1)
+    # Parse get_match тратит кредиты — ограничим объём без OPENDOTA_API_KEY.
+    if not OPENDOTA_API_KEY and PARSE_API_KEY and len(match_ids) > 100:
+        print(f"OpenDota pubs: cap fetch {len(match_ids)} → 100 (Parse credits)", flush=True)
+        match_ids = match_ids[:100]
+    # Explorer public_matches редко содержит Immortal (80) — Divine 5 (75) как proxy.
+    accept_mmr = mmr_floor
+    if known_rank and max(known_rank.values(), default=0) < mmr_request_to_min_rank(mmr_floor):
+        accept_mmr = 5500  # → rank proxy 75
+        print(
+            f"OpenDota pubs: accept Divine5+ (avg_rank_tier>=75) — "
+            f"Immortal sparse in explorer (wanted mmr>={mmr_floor})",
+            flush=True,
+        )
     print(f"OpenDota pubs collect: fetching {len(match_ids)} matches...", flush=True)
     for index, match_id in enumerate(match_ids):
         if all(by_hero[hid] >= per_hero for hid in hero_ids):
@@ -844,26 +898,30 @@ def collect_high_mmr_pubs(
         was_cached = _cached_match(match_id) is not None
         match = fetch_match(match_id, use_cache=True)
         if not was_cached:
-            _gap()
+            _gap(0.35 if PARSE_API_KEY and not OPENDOTA_API_KEY else 1.0)
         if match is None:
             continue
         # Только паблики: league уже покрыты explorer-путём.
         if int(match.get("leagueid") or 0) > 0:
             continue
+        lobby = int(match.get("lobby_type") or -1)
+        # 7 = ranked, 0 = normal/unranked public; 1 = practice/tournament-ish.
+        if lobby not in (0, 7):
+            continue
         if match_avg_rank_tier(match) is None and match_id in known_rank:
             match = dict(match)
             match["avg_rank_tier"] = known_rank[match_id]
-        if not match_mmr_ok(match, min_mmr=mmr_floor):
+        if not match_mmr_ok(match, min_mmr=accept_mmr):
             continue
         take = extract_player_rows(
             match,
             hero_ids=hero_ids,
             lane_role=lane_role,
-            min_rank=max(rank_floor, mmr_request_to_min_rank(mmr_floor)),
+            min_rank=max(rank_floor, mmr_request_to_min_rank(accept_mmr)),
             max_age_days=age,
             allow_league=False,
             strict_lane=True,
-            min_mmr=mmr_floor,
+            min_mmr=accept_mmr,
             accept_high_mmr_match=True,
             source="opendota_pub",
         )

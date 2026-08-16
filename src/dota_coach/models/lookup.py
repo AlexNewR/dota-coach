@@ -59,7 +59,8 @@ class ItemLookup:
     def __init__(self, table: dict[str, Any] | None = None) -> None:
         self.table = table if table is not None else load_item_lookup()
 
-    def recommend(self, state: GameState, role: int = DEFAULT_LANE_ROLE, top_k: int = 3) -> list[str]:
+    def get_ranked_items(self, state: GameState, role: int = DEFAULT_LANE_ROLE) -> list[tuple[str, float]]:
+        """Возвращает список (item_name, norm_frequency) для текущего состояния."""
         owned = {normalize_item_name(item) for item in state.items}
         bucket = _bucket(state.minute)
         for key in (
@@ -68,14 +69,23 @@ class ItemLookup:
             f"{state.hero_id}:{role}:{max(0, bucket - 5)}",
         ):
             row = self.table.get(key)
-            if not row:
+            if not row or not row.get("items"):
                 continue
-            names = [
-                item["name"]
-                for item in row["items"]
-                if _should_recommend(item["name"], state, owned)
+            valid = [
+                it
+                for it in row["items"]
+                if _should_recommend(it["name"], state, owned)
             ]
-            pairs = ensure_early_boots([(n, None) for n in names], state, top_k=top_k)
+            if not valid:
+                continue
+            total = sum(int(it.get("count", 1)) for it in valid) or 1
+            return [(str(it["name"]), float(it.get("count", 1)) / float(total)) for it in valid]
+        return []
+
+    def recommend(self, state: GameState, role: int = DEFAULT_LANE_ROLE, top_k: int = 3) -> list[str]:
+        ranked = self.get_ranked_items(state, role)
+        if ranked:
+            pairs = ensure_early_boots([(n, p) for n, p in ranked], state, top_k=top_k)
             if pairs:
                 return [name for name, _ in pairs]
         # Нет частотных айтемов в бакете — всё равно попробуем ботинки.

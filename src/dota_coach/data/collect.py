@@ -26,6 +26,26 @@ from dota_coach.data.opendota import (
 from dota_coach.data.parse_api import ParseConfigError, collect_parse
 from dota_coach.data.protracker import collect_protracker
 from dota_coach.data.synthetic import PROTRACKER_SNAPSHOT, synthetic_dataset
+from dota_coach.constants import MID_SKIP_ITEMS, normalize_item_name
+
+
+def sanitize_mid_player_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop mid rows that bought banned support items (e.g. Arcane Boots).
+
+    OpenDota иногда помечает pos4/5 KotL как lane_role=2 — в логе тогда
+    Arcane → Mek/Greaves + варды. Такие ряды не должны учить mid-NN.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for row in rows:
+        keys = {
+            normalize_item_name(event.get("key"))
+            for event in (row.get("purchase_log") or [])
+        }
+        keys.discard("")
+        if keys & MID_SKIP_ITEMS:
+            continue
+        cleaned.append(row)
+    return cleaned
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -297,6 +317,10 @@ def collect(
         except Exception as exc:  # noqa: BLE001
             pub_note = f"pubs failed ({exc})"
 
+    before_san = len(rows)
+    rows = sanitize_mid_player_rows(rows)
+    dropped_skip = before_san - len(rows)
+
     _write_jsonl(PLAYER_ROWS_PATH, rows)
     by_hero: dict[str, int] = {}
     for row in rows:
@@ -317,6 +341,7 @@ def collect(
             for hid, hero in heroes.items()
         },
         "player_rows": len(rows),
+        "dropped_mid_skip_rows": dropped_skip,
         "opendota": opendota_note,
         "opendota_pubs": pub_note,
         "opendota_primary": opendota_primary,
@@ -346,6 +371,7 @@ def load_player_rows(path: Path | None = None) -> list[dict[str, Any]]:
     for line in target.read_text(encoding="utf-8").splitlines():
         if line.strip():
             rows.append(json.loads(line))
+    rows = sanitize_mid_player_rows(rows)
     return rows or synthetic_dataset()
 
 

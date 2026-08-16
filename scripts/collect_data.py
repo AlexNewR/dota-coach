@@ -48,7 +48,10 @@ def main() -> None:
         "--min-mmr",
         type=int,
         default=OPENDOTA_MIN_MMR,
-        help=f"Минимальный avg_mmr пабликов (default {OPENDOTA_MIN_MMR})",
+        help=(
+            f"Целевой avg_mmr пабликов (default {OPENDOTA_MIN_MMR}). "
+            "OpenDota убрал avg_mmr — на практике Immortal/Divine5+ (rank 75–80)"
+        ),
     )
     parser.add_argument(
         "--pub-pages",

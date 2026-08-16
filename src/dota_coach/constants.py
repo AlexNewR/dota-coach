@@ -354,12 +354,20 @@ EARLY_SELL_ITEMS: tuple[str, ...] = (
 HERO_PREFERRED_BOOTS: dict[int, str] = {
     80: "power_treads",
     107: "power_treads",
-    90: "arcane_boots",
-    91: "arcane_boots",
+    90: "travel_boots",
+    91: "travel_boots",
 }
 
 CONSUMABLE_PREFIXES = ("recipe_", "item_recipe_")
 CORE_PURCHASE_RATE = 45.0
+
+# Саппорт-предметы, которые никогда не советуем mid-коучу (LD / Io / KotL / ES).
+# Фильтруются в NN, lookup, counters, синтетике через item_allowed_for_hero.
+MID_SKIP_ITEMS: frozenset[str] = frozenset(
+    {
+        "arcane_boots",
+    }
+)
 
 # Саппорт-слоты, которые D2PT тащит в общую таблицу Io. На миде их не советуем.
 HERO_SKIP_ITEMS: dict[int, set[str]] = {
@@ -450,7 +458,11 @@ def normalize_item_name(raw: str | None) -> str:
         "vessel": "spirit_vessel",
         "greaves": "guardian_greaves",
         "travels": "travel_boots",
+        "boots_of_travel": "travel_boots",
+        "travel_boot": "travel_boots",
         "treads": "power_treads",
+        "arcanes": "arcane_boots",
+        "mana_boots": "arcane_boots",
         "wand": "magic_wand",
     }
     return aliases.get(name, name)
@@ -459,6 +471,8 @@ def normalize_item_name(raw: str | None) -> str:
 def item_allowed_for_hero(hero_id: int, name: str) -> bool:
     key = normalize_item_name(name)
     if not key:
+        return False
+    if key in MID_SKIP_ITEMS:
         return False
     return key not in HERO_SKIP_ITEMS.get(hero_id, set())
 
@@ -562,7 +576,15 @@ def inventory_free_actions(
 
 
 def preferred_boots_for_hero(hero_id: int) -> str:
-    return HERO_PREFERRED_BOOTS.get(int(hero_id) or 0, "power_treads")
+    """Finished boots goal for mid hero; never returns MID_SKIP / hero-skip boots."""
+    hid = int(hero_id) or 0
+    boot = HERO_PREFERRED_BOOTS.get(hid, "power_treads")
+    if item_allowed_for_hero(hid, boot):
+        return boot
+    for fallback in ("travel_boots", "power_treads", "phase_boots"):
+        if item_allowed_for_hero(hid, fallback):
+            return fallback
+    return "travel_boots"
 
 
 def item_display(name: str) -> str:

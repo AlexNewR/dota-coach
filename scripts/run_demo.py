@@ -297,7 +297,71 @@ def check_inventory_and_boots() -> None:
     assert _should_recommend("power_treads", early, set(early.items))
     boots = ensure_early_boots([("blink", None), ("spirit_vessel", None)], early)
     assert boots[0][0] == "power_treads", boots
-    print("OK: inventory sell/consume + ES Power Treads gates.")
+
+    # KotL mid без ботинок → Travels, не Arcane.
+    kotl_empty = normalize_gsi(
+        gsi_payload(
+            clock=3 * 60,
+            last_hits=12,
+            gold=800,
+            deaths=0,
+            alive=True,
+            items=[],
+            hero_id=90,
+            hero="npc_dota_hero_keeper_of_the_light",
+        )
+    )
+    assert _should_recommend("travel_boots", kotl_empty, set())
+    assert not _should_recommend("arcane_boots", kotl_empty, set())
+    assert not _should_recommend("arcanes", kotl_empty, set())
+    kotl_boots = ensure_early_boots([("urn_of_shadows", None), ("magic_wand", None)], kotl_empty)
+    assert kotl_boots[0][0] == "travel_boots", kotl_boots
+    kotl_mid = normalize_gsi(
+        gsi_payload(
+            clock=10 * 60,
+            last_hits=55,
+            gold=2200,
+            deaths=1,
+            alive=True,
+            items=["magic_wand", "urn_of_shadows", "spirit_vessel"],
+            hero_id=90,
+            hero="npc_dota_hero_keeper_of_the_light",
+        )
+    )
+    mid_boots = ensure_early_boots([("octarine_core", None), ("orchid", None)], kotl_mid)
+    assert mid_boots[0][0] == "travel_boots", mid_boots
+    assert not any(n == "arcane_boots" for n, _ in mid_boots), mid_boots
+
+    # Arcane Boots запрещены всем mid-героям коуча (LD / Io / KotL / ES).
+    from dota_coach.config import DEFAULT_HERO_IDS
+    from dota_coach.constants import preferred_boots_for_hero
+
+    hero_npc = {
+        80: "npc_dota_hero_lone_druid",
+        91: "npc_dota_hero_wisp",
+        90: "npc_dota_hero_keeper_of_the_light",
+        107: "npc_dota_hero_earth_spirit",
+    }
+    for hid in DEFAULT_HERO_IDS:
+        assert preferred_boots_for_hero(hid) != "arcane_boots", hid
+        for clock, bag in ((2 * 60, []), (8 * 60, ["magic_wand"]), (14 * 60, ["magic_wand", "bottle"])):
+            st = normalize_gsi(
+                gsi_payload(
+                    clock=clock,
+                    last_hits=20,
+                    gold=1500,
+                    deaths=0,
+                    alive=True,
+                    items=bag,
+                    hero_id=hid,
+                    hero=hero_npc[hid],
+                )
+            )
+            owned = {n for n in st.items if n}
+            assert not _should_recommend("arcane_boots", st, owned), (hid, clock)
+            for name, _ in ensure_early_boots([("black_king_bar", None)], st):
+                assert name != "arcane_boots", (hid, clock, name)
+    print("OK: inventory sell/consume + ES Power Treads + KotL Travels + mid Arcane ban.")
 
 
 def main() -> None:

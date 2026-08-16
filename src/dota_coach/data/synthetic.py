@@ -28,6 +28,7 @@ PROTRACKER_SNAPSHOT: dict[int, dict[str, Any]] = {
             {"name": "item_orchid", "purchase_rate": 25.2, "avg_minute": 15.5, "price": 3275},
             {"name": "item_octarine_core", "purchase_rate": 100.0, "avg_minute": 23.4, "price": 4600},
             {"name": "item_dagon", "purchase_rate": 20.2, "avg_minute": 23.6, "price": 2850},
+            {"name": "item_ethereal_blade", "purchase_rate": 12.0, "avg_minute": 26.0, "price": 4650},
             {"name": "item_black_king_bar", "purchase_rate": 33.0, "avg_minute": 28.6, "price": 4050},
             {"name": "item_aghanims_shard", "purchase_rate": 48.8, "avg_minute": 29.8, "price": 1400},
             {"name": "item_ultimate_scepter", "purchase_rate": 31.0, "avg_minute": 31.1, "price": 4200},

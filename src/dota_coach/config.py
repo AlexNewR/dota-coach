@@ -102,7 +102,7 @@ ITEM_MODEL_PATH = MODELS_DIR / "item_mlp.npz"
 ITEM_VOCAB_PATH = MODELS_DIR / "item_vocab.json"
 PLAYER_ROWS_PATH = RAW_DIR / "player_rows.jsonl"
 
-APP_VERSION = os.getenv("DOTA_COACH_VERSION", "0.2.2")
+APP_VERSION = os.getenv("DOTA_COACH_VERSION", "0.3.0")
 GITHUB_REPO = os.getenv("DOTA_COACH_GITHUB_REPO", "")
 UPDATE_CHANNEL_PATH = DATA_DIR / "update_channel.json"
 VERSION_PATH = DATA_DIR / "version.json"

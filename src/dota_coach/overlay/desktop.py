@@ -11,17 +11,25 @@ import tkinter as tk
 from ctypes import wintypes
 from typing import Any, Callable
 
-BG = "#101218"
-PANEL = "#171b24"
+# Цветовая палитра современного темного HUD оверлея
+BG = "#0f1218"
+TITLE_BG = "#090b0f"
+PANEL = "#161a24"
+PANEL_BORDER = "#212736"
 TEXT = "#ece7d8"
-MUTED = "#9aa3b2"
+MUTED = "#8e99a8"
 GOLD = "#d4b15f"
 OK = "#6fbf8a"
 BAD = "#c45c4a"
-HINT_BG = "#1d2330"
+HINT_BG = "#191f2c"
+WINDOW_BORDER = "#262d3d"
 FONT = "Segoe UI"
-MIN_W = 300
-MIN_H = 240
+
+MIN_W = 260
+MIN_H = 32
+DEFAULT_W = 340
+DEFAULT_H = 400
+COLLAPSED_H = 30
 
 VK_F8 = 0x77
 WH_KEYBOARD_LL = 13
@@ -148,8 +156,8 @@ class F8HotkeyWatcher:
                     elif not self._held:
                         self._held = True
                         fire = True
-                if fire:
-                    self._fire()
+                    if fire:
+                        self._fire()
         return int(user32.CallNextHookEx(self._hook, n_code, w_param, l_param))
 
     def _hook_loop(self) -> None:
@@ -188,17 +196,26 @@ def _pace(value: int, p50: Any) -> str:
 
 
 class CoachDesktop:
-    def __init__(self, width: int, height: int, x: int, y: int) -> None:
+    def __init__(self, width: int = DEFAULT_W, height: int = DEFAULT_H, x: int = 16, y: int = 80) -> None:
         self.root = tk.Tk()
-        self.root.title("Dota Coach")
+        self.root.overrideredirect(True)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
         self.root.minsize(MIN_W, MIN_H)
-        self.root.configure(bg=BG)
+        self.root.configure(bg=WINDOW_BORDER)
         self.root.attributes("-topmost", True)
+
+        self._width = width
+        self._expanded_height = height
+        self._collapsed = False
+        self._last_data: dict[str, Any] = {}
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+
         self.visible = True
         self._hint_visible = False
         self._toggle_pending = False
         self._hotkey_via_hook = False
+
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._hotkey = F8HotkeyWatcher(self._request_toggle)
@@ -210,12 +227,15 @@ class CoachDesktop:
         self.root.bind("<F8>", self._on_tk_f8)
         self.root.focus_force()
 
-    def _on_close(self) -> None:
+    def _on_close(self, _event: tk.Event | None = None) -> None:
         try:
             self._hotkey.stop()
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def _check_hook(self) -> None:
         self._hotkey_via_hook = bool(self._hotkey.hook_ok)
@@ -239,73 +259,258 @@ class CoachDesktop:
     def _label(self, parent: tk.Misc, **kwargs) -> tk.Label:
         kwargs.setdefault("bg", parent.cget("bg") if hasattr(parent, "cget") else BG)
         kwargs.setdefault("fg", TEXT)
-        kwargs.setdefault("font", (FONT, 10))
+        kwargs.setdefault("font", (FONT, 9))
         kwargs.setdefault("anchor", "w")
         kwargs.setdefault("justify", "left")
         return tk.Label(parent, **kwargs)
 
+    def _header_btn(
+        self,
+        parent: tk.Misc,
+        text: str,
+        command: Callable[[], None],
+        hover_bg: str = "#252b3b",
+        hover_fg: str = "#ffffff",
+        normal_bg: str = TITLE_BG,
+        normal_fg: str = MUTED,
+    ) -> tk.Label:
+        btn = tk.Label(
+            parent,
+            text=text,
+            bg=normal_bg,
+            fg=normal_fg,
+            font=(FONT, 9, "bold"),
+            width=3,
+            anchor="center",
+            cursor="hand2",
+        )
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=hover_bg, fg=hover_fg))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=normal_bg, fg=normal_fg))
+        btn.bind("<Button-1>", lambda _e: command())
+        return btn
+
+    def _make_draggable(self, widget: tk.Misc) -> None:
+        widget.bind("<Button-1>", self._start_drag, add="+")
+        widget.bind("<B1-Motion>", self._do_drag, add="+")
+
+    def _start_drag(self, event: tk.Event) -> None:
+        self._drag_start_x = event.x_root - self.root.winfo_x()
+        self._drag_start_y = event.y_root - self.root.winfo_y()
+
+    def _do_drag(self, event: tk.Event) -> None:
+        new_x = event.x_root - self._drag_start_x
+        new_y = event.y_root - self._drag_start_y
+        self.root.geometry(f"+{new_x}+{new_y}")
+
+    def toggle_collapse(self) -> None:
+        self._collapsed = not self._collapsed
+        cur_x = self.root.winfo_x()
+        cur_y = self.root.winfo_y()
+        cur_w = self.root.winfo_width() or self._width
+        if self._collapsed:
+            self._content_frame.pack_forget()
+            self.btn_collapse.configure(text="▢")
+            self.root.geometry(f"{cur_w}x{COLLAPSED_H}+{cur_x}+{cur_y}")
+            self._update_collapsed_title()
+        else:
+            self.title_extra.configure(text="")
+            self._content_frame.pack(fill="both", expand=True)
+            self.btn_collapse.configure(text="—")
+            target_h = max(240, self._expanded_height)
+            self.root.geometry(f"{cur_w}x{target_h}+{cur_x}+{cur_y}")
+
+    def _update_collapsed_title(self, data: dict[str, Any] | None = None) -> None:
+        if not self._collapsed:
+            return
+        if data is None:
+            data = getattr(self, "_last_data", {})
+        hero = str(data.get("hero") or "").strip()
+        clock = _fmt_clock(int(data.get("clock") or 0))
+        kda = data.get("kda")
+        parts = []
+        if hero:
+            parts.append(hero)
+        if clock and clock != "0:00":
+            parts.append(clock)
+        if kda and any(kda):
+            parts.append("/".join(str(p) for p in kda))
+        self.title_extra.configure(text=" · " + " · ".join(parts) if parts else "")
+
     def _build(self) -> None:
-        pad = {"padx": 12, "pady": 2}
-        header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x", padx=12, pady=(12, 4))
-        left = tk.Frame(header, bg=BG)
+        # Внешний контейнер с тонкой рамкой для выделения окна поверх игры
+        self.outer_frame = tk.Frame(
+            self.root,
+            bg=BG,
+            highlightbackground=WINDOW_BORDER,
+            highlightcolor=WINDOW_BORDER,
+            highlightthickness=1,
+        )
+        self.outer_frame.pack(fill="both", expand=True)
+
+        # Кастомная шапка окна (Titlebar) с кнопками управления и drag-зоной
+        self.title_bar = tk.Frame(self.outer_frame, bg=TITLE_BG, height=28)
+        self.title_bar.pack(fill="x", side="top")
+        self.title_bar.pack_propagate(False)
+
+        title_left = tk.Frame(self.title_bar, bg=TITLE_BG)
+        title_left.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        self.title_label = tk.Label(
+            title_left,
+            text="DOTA COACH",
+            bg=TITLE_BG,
+            fg=GOLD,
+            font=(FONT, 8, "bold"),
+            anchor="w",
+        )
+        self.title_label.pack(side="left")
+
+        self.title_extra = tk.Label(
+            title_left,
+            text="",
+            bg=TITLE_BG,
+            fg=MUTED,
+            font=(FONT, 8),
+            anchor="w",
+        )
+        self.title_extra.pack(side="left", padx=(6, 0))
+
+        title_right = tk.Frame(self.title_bar, bg=TITLE_BG)
+        title_right.pack(side="right")
+
+        self.btn_collapse = self._header_btn(
+            title_right,
+            text="—",
+            command=self.toggle_collapse,
+            hover_bg="#252b3b",
+            hover_fg="#ffffff",
+            normal_bg=TITLE_BG,
+            normal_fg=MUTED,
+        )
+        self.btn_collapse.pack(side="left")
+
+        self.btn_close = self._header_btn(
+            title_right,
+            text="✕",
+            command=self._on_close,
+            hover_bg=BAD,
+            hover_fg="#ffffff",
+            normal_bg=TITLE_BG,
+            normal_fg=MUTED,
+        )
+        self.btn_close.pack(side="left")
+
+        # Перетаскивание за шапку и двойной клик для сворачивания
+        for w in (self.title_bar, title_left, self.title_label, self.title_extra):
+            self._make_draggable(w)
+            w.bind("<Double-Button-1>", lambda _e: self.toggle_collapse())
+
+        # Основной контент оверлея
+        self._content_frame = tk.Frame(self.outer_frame, bg=BG)
+        self._content_frame.pack(fill="both", expand=True)
+
+        pad = {"padx": 10, "pady": 1}
+
+        # Блок героя и таймера матча
+        self.header_frame = tk.Frame(self._content_frame, bg=BG)
+        self.header_frame.pack(fill="x", padx=10, pady=(6, 2))
+        self._make_draggable(self.header_frame)
+
+        left = tk.Frame(self.header_frame, bg=BG)
         left.pack(side="left", fill="x", expand=True)
+        self._make_draggable(left)
+
         self.eyebrow = self._label(left, text="БИЛД · МИД", fg=GOLD, font=(FONT, 8, "bold"))
         self.eyebrow.pack(anchor="w")
-        self.hero = self._label(left, text="Ожидание матча", font=(FONT, 14, "bold"))
-        self.hero.pack(anchor="w")
-        self.detected = self._label(left, text="", fg=MUTED, font=(FONT, 9))
-        self.detected.pack(anchor="w")
-        self.clock = self._label(header, text="0:00", fg=GOLD, font=(FONT, 16), anchor="e")
-        self.clock.pack(side="right", padx=(8, 0))
+        self._make_draggable(self.eyebrow)
 
-        stats = tk.Frame(self.root, bg=BG)
-        stats.pack(fill="x", padx=10, pady=8)
+        self.hero = self._label(left, text="Ожидание матча", font=(FONT, 13, "bold"))
+        self.hero.pack(anchor="w")
+        self._make_draggable(self.hero)
+
+        self.detected = self._label(left, text="", fg=MUTED, font=(FONT, 8))
+        self.detected.pack(anchor="w")
+        self._make_draggable(self.detected)
+
+        self.clock = self._label(self.header_frame, text="0:00", fg=GOLD, font=(FONT, 15, "bold"), anchor="e")
+        self.clock.pack(side="right", padx=(6, 0))
+        self._make_draggable(self.clock)
+
+        # Сетка статистики: KDA, Крипы, Золото/мин, Золото
+        stats = tk.Frame(self._content_frame, bg=BG)
+        stats.pack(fill="x", padx=8, pady=4)
         self.stat_values: dict[str, tk.Label] = {}
         for col, (key, title) in enumerate(
             (("kda", "У/С/П"), ("lh", "Крипы"), ("gpm", "Золото/мин"), ("gold", "Золото"))
         ):
-            cell = tk.Frame(stats, bg=PANEL, highlightthickness=0)
-            cell.grid(row=0, column=col, sticky="nsew", padx=3, ipady=6)
+            cell = tk.Frame(
+                stats,
+                bg=PANEL,
+                highlightbackground=PANEL_BORDER,
+                highlightcolor=PANEL_BORDER,
+                highlightthickness=1,
+            )
+            cell.grid(row=0, column=col, sticky="nsew", padx=2, ipady=3)
             stats.grid_columnconfigure(col, weight=1)
-            self._label(cell, text=title, fg=MUTED, font=(FONT, 8), bg=PANEL, anchor="center").pack()
-            value = self._label(cell, text="0", font=(FONT, 13, "bold"), bg=PANEL, anchor="center")
+            self._label(cell, text=title, fg=MUTED, font=(FONT, 7), bg=PANEL, anchor="center").pack()
+            value = self._label(cell, text="0", font=(FONT, 12, "bold"), bg=PANEL, anchor="center")
             value.pack()
             self.stat_values[key] = value
 
-        body = tk.Frame(self.root, bg=BG)
-        body.pack(fill="both", expand=True, padx=12)
-        self.farm = self._label(body, text="", fg=MUTED, font=(FONT, 9), wraplength=340)
+        # Тело с рекомендациями и подсказками
+        body = tk.Frame(self._content_frame, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(2, 2))
+
+        self.farm = self._label(body, text="", fg=MUTED, font=(FONT, 8), wraplength=310)
         self.farm.pack(fill="x", **pad)
-        self.matchup = self._label(body, text="", fg=MUTED, font=(FONT, 9), wraplength=340)
+        self.matchup = self._label(body, text="", fg=MUTED, font=(FONT, 8), wraplength=310)
         self.matchup.pack(fill="x", **pad)
-        self.items = self._label(body, text="", fg=MUTED, font=(FONT, 9), wraplength=340)
+        self.items = self._label(body, text="", fg=MUTED, font=(FONT, 8), wraplength=310)
         self.items.pack(fill="x", **pad)
-        self.items_bad = self._label(body, text="", fg=BAD, font=(FONT, 9, "bold"), wraplength=340)
+        self.items_bad = self._label(body, text="", fg=BAD, font=(FONT, 8, "bold"), wraplength=310)
         self.items_bad.pack(fill="x", **pad)
-        self.recs = self._label(body, text="", fg=MUTED, font=(FONT, 9), wraplength=340)
+        self.recs = self._label(body, text="", fg=MUTED, font=(FONT, 8), wraplength=310)
         self.recs.pack(fill="x", **pad)
-        self.counters = self._label(body, text="", fg=OK, font=(FONT, 9), wraplength=340)
+        self.counters = self._label(body, text="", fg=OK, font=(FONT, 8), wraplength=310)
         self.counters.pack(fill="x", **pad)
 
-        self.hint = tk.Frame(body, bg=HINT_BG, highlightbackground=GOLD, highlightthickness=2)
-        self.hint_title = self._label(self.hint, text="", bg=HINT_BG, font=(FONT, 11, "bold"))
-        self.hint_title.pack(anchor="w", padx=10, pady=(8, 2))
-        self.hint_body = self._label(self.hint, text="", bg=HINT_BG, font=(FONT, 9), wraplength=320)
-        self.hint_body.pack(anchor="w", padx=10)
-        self.hint_instead = self._label(self.hint, text="", bg=HINT_BG, fg=OK, font=(FONT, 9, "bold"), wraplength=320)
-        self.hint_instead.pack(anchor="w", padx=10, pady=(4, 8))
+        # Контекстная подсказка (при ошибках/смертях/просадках)
+        self.hint = tk.Frame(body, bg=HINT_BG, highlightbackground=GOLD, highlightthickness=1)
+        self.hint_title = self._label(self.hint, text="", bg=HINT_BG, font=(FONT, 9, "bold"))
+        self.hint_title.pack(anchor="w", padx=8, pady=(4, 1))
+        self.hint_body = self._label(self.hint, text="", bg=HINT_BG, font=(FONT, 8), wraplength=300)
+        self.hint_body.pack(anchor="w", padx=8)
+        self.hint_instead = self._label(self.hint, text="", bg=HINT_BG, fg=OK, font=(FONT, 8, "bold"), wraplength=300)
+        self.hint_instead.pack(anchor="w", padx=8, pady=(2, 4))
 
-        foot = self._label(self.root, text="F8 — скрыть / показать", fg=MUTED, font=(FONT, 8), anchor="center")
-        foot.pack(fill="x", pady=(4, 8))
+        # Подвал
+        self.foot = self._label(self._content_frame, text="F8 — скрыть · ЛКМ — перетащить", fg=MUTED, font=(FONT, 7), anchor="center")
+        self.foot.pack(fill="x", pady=(2, 4))
+        self._make_draggable(self.foot)
+
         self.root.bind("<Configure>", self._on_resize)
 
     def _on_resize(self, event: tk.Event) -> None:
         if event.widget is not self.root:
             return
-        wrap = max(200, event.width - 40)
-        for widget in (self.farm, self.matchup, self.items, self.items_bad, self.recs, self.counters, self.hint_body, self.hint_instead):
-            widget.configure(wraplength=wrap)
+        if not self._collapsed and event.height > COLLAPSED_H + 40:
+            self._expanded_height = event.height
+            self._width = event.width
+        wrap = max(180, event.width - 24)
+        for widget in (
+            self.farm,
+            self.matchup,
+            self.items,
+            self.items_bad,
+            self.recs,
+            self.counters,
+            self.hint_body,
+            self.hint_instead,
+        ):
+            try:
+                widget.configure(wraplength=wrap)
+            except Exception:
+                pass
 
     def _poll_hotkey(self) -> None:
         if self._toggle_pending:
@@ -325,6 +530,7 @@ class CoachDesktop:
             self.visible = False
         else:
             self.root.deiconify()
+            self.root.overrideredirect(True)
             self.root.attributes("-topmost", True)
             self.root.lift()
             self.visible = True
@@ -339,6 +545,10 @@ class CoachDesktop:
         self.root.after(250, self._tick)
 
     def render(self, data: dict[str, Any]) -> None:
+        self._last_data = data
+        if self._collapsed:
+            self._update_collapsed_title(data)
+
         hero = data.get("hero") or ""
         if hero:
             self.hero.configure(text=hero)
@@ -453,7 +663,7 @@ class CoachDesktop:
             else:
                 self.hint_instead.configure(text="")
             if not self._hint_visible:
-                self.hint.pack(fill="x", pady=8)
+                self.hint.pack(fill="x", pady=(4, 4))
                 self._hint_visible = True
         elif self._hint_visible:
             self.hint.pack_forget()
@@ -490,8 +700,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Dota Coach — десктоп-оверлей")
     parser.add_argument("--x", type=int, default=16)
     parser.add_argument("--y", type=int, default=80)
-    parser.add_argument("--width", type=int, default=380)
-    parser.add_argument("--height", type=int, default=540)
+    parser.add_argument("--width", type=int, default=DEFAULT_W)
+    parser.add_argument("--height", type=int, default=DEFAULT_H)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--no-update", action="store_true", help="Не проверять GitHub Releases")
     args = parser.parse_args()
@@ -532,6 +742,7 @@ def main() -> None:
 
     print(f"GSI слушает {host}:{gsi_port}/gsi — браузер не нужен.")
     print("Dota 2: Borderless Windowed + -gamestateintegration")
+    print("Оверлей: перетаскивание за шапку, кнопки [—] сворачивание и [✕] закрытие")
     print("F8 — скрыть / показать окно (работает поверх Dota)")
     CoachDesktop(args.width, args.height, args.x, args.y).run()
 
