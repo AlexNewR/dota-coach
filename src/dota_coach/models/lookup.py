@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from dota_coach.config import DEFAULT_LANE_ROLE, ITEM_LOOKUP_PATH
-from dota_coach.constants import normalize_item_name
+from dota_coach.constants import normalize_item_name, resolve_upgrade_prerequisite
 from dota_coach.gsi.normalize import GameState
 from dota_coach.models.items import _should_recommend, ensure_early_boots
 
@@ -59,7 +59,12 @@ class ItemLookup:
     def __init__(self, table: dict[str, Any] | None = None) -> None:
         self.table = table if table is not None else load_item_lookup()
 
-    def get_ranked_items(self, state: GameState, role: int = DEFAULT_LANE_ROLE) -> list[tuple[str, float]]:
+    def get_ranked_items(
+        self,
+        state: GameState,
+        role: int = DEFAULT_LANE_ROLE,
+        sold_items: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
         """Возвращает список (item_name, norm_frequency) для текущего состояния."""
         owned = {normalize_item_name(item) for item in state.items}
         bucket = _bucket(state.minute)
@@ -71,23 +76,33 @@ class ItemLookup:
             row = self.table.get(key)
             if not row or not row.get("items"):
                 continue
-            valid = [
-                it
-                for it in row["items"]
-                if _should_recommend(it["name"], state, owned)
-            ]
-            if not valid:
+            valid_map: dict[str, int] = {}
+            for it in row["items"]:
+                raw_name = str(it.get("name") or "")
+                name = resolve_upgrade_prerequisite(raw_name, owned, minute=state.minute)
+                if not _should_recommend(name, state, owned, sold_items=sold_items):
+                    continue
+                cnt = int(it.get("count", 1))
+                valid_map[name] = valid_map.get(name, 0) + cnt
+            if not valid_map:
                 continue
-            total = sum(int(it.get("count", 1)) for it in valid) or 1
-            return [(str(it["name"]), float(it.get("count", 1)) / float(total)) for it in valid]
+            total = sum(valid_map.values()) or 1
+            sorted_items = sorted(valid_map.items(), key=lambda x: -x[1])
+            return [(name, float(cnt) / float(total)) for name, cnt in sorted_items]
         return []
 
-    def recommend(self, state: GameState, role: int = DEFAULT_LANE_ROLE, top_k: int = 3) -> list[str]:
-        ranked = self.get_ranked_items(state, role)
+    def recommend(
+        self,
+        state: GameState,
+        role: int = DEFAULT_LANE_ROLE,
+        top_k: int = 3,
+        sold_items: set[str] | None = None,
+    ) -> list[str]:
+        ranked = self.get_ranked_items(state, role, sold_items=sold_items)
         if ranked:
-            pairs = ensure_early_boots([(n, p) for n, p in ranked], state, top_k=top_k)
+            pairs = ensure_early_boots([(n, p) for n, p in ranked], state, top_k=top_k, sold_items=sold_items)
             if pairs:
                 return [name for name, _ in pairs]
         # Нет частотных айтемов в бакете — всё равно попробуем ботинки.
-        pairs = ensure_early_boots([], state, top_k=top_k)
+        pairs = ensure_early_boots([], state, top_k=top_k, sold_items=sold_items)
         return [name for name, _ in pairs]

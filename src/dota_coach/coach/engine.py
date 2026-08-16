@@ -15,6 +15,7 @@ from dota_coach.constants import (
     hero_display,
     inventory_free_actions,
     is_finished_item,
+    is_upgrade_of_owned,
     item_allowed_for_hero,
     item_display,
     normalize_item_name,
@@ -45,6 +46,8 @@ class CoachEngine:
         self.prev: GameState | None = None
         self.below_since: float | None = None
         self.last_inventory: set[str] = set()
+        self.previously_owned_items: set[str] = set()
+        self.sold_items: set[str] = set()
         self.prev_recommended: list[str] = []
         self.current_hero_id = 0
         self.current_hero_npc = ""
@@ -63,6 +66,8 @@ class CoachEngine:
         with self._lock:
             self.policy = HintPolicy()
             self.last_inventory = set()
+            self.previously_owned_items = set()
+            self.sold_items = set()
             self.prev_recommended = []
             self.below_since = None
             self.known_enemies = []
@@ -175,13 +180,13 @@ class CoachEngine:
 
     def _recommend_items(self, state: GameState) -> tuple[list[tuple[str, float | None]], str]:
         """Плавный ансамбль NN + D2PT/OpenDota lookup по минутам и уверенности."""
-        lookup_ranked = self.lookup.get_ranked_items(state, self.role)
+        lookup_ranked = self.lookup.get_ranked_items(state, self.role, sold_items=self.sold_items)
         lookup_pairs = [(name, float(p)) for name, p in lookup_ranked]
         pairs: list[tuple[str, float | None]] = []
         source = "none"
 
         if self.items is not None and state.hero_id in DEFAULT_HERO_IDS:
-            nn = self.items.recommend(state, self.role, top_k=6)
+            nn = self.items.recommend(state, self.role, top_k=6, sold_items=self.sold_items)
             if nn:
                 top_p = float(nn[0][1]) if nn[0][1] is not None else 0.0
                 # Плавный переход по времени (от минут 3 до 15)
@@ -219,7 +224,7 @@ class CoachEngine:
             pairs = [(name, float(p) if p is not None else None) for name, p in lookup_pairs[:3]]
             source = "lookup"
 
-        ensured = ensure_early_boots(pairs, state)
+        ensured = ensure_early_boots(pairs, state, sold_items=self.sold_items)
         if ensured and not pairs:
             source = "boots"
         merged = self._counter_boost(state, ensured)
@@ -388,6 +393,20 @@ class CoachEngine:
                 self.prev = state
                 return None
             owned = set(state.items)
+            current_normalized = {normalize_item_name(x) for x in state.items if x}
+            if getattr(state, "scepter_consumed", False) or getattr(state, "has_scepter", False):
+                current_normalized.add("ultimate_scepter")
+            if getattr(state, "has_shard", False):
+                current_normalized.add("aghanims_shard")
+            if getattr(state, "moon_shard_consumed", False):
+                current_normalized.add("moon_shard")
+            if self.previously_owned_items:
+                disappeared = self.previously_owned_items - current_normalized
+                for item in disappeared:
+                    if not is_upgrade_of_owned(item, current_normalized):
+                        self.sold_items.add(item)
+            self.previously_owned_items.update(current_normalized)
+
             new_items = owned - self.last_inventory
             pairs, _rec_source = self._recommend_items(state)
             recommended_now = [name for name, _ in pairs]

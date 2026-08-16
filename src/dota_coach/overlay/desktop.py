@@ -25,11 +25,11 @@ HINT_BG = "#191f2c"
 WINDOW_BORDER = "#262d3d"
 FONT = "Segoe UI"
 
-MIN_W = 260
-MIN_H = 32
-DEFAULT_W = 340
-DEFAULT_H = 400
-COLLAPSED_H = 30
+MIN_W = 230
+MIN_H = 140
+DEFAULT_W = 310
+DEFAULT_H = 340
+COLLAPSED_H = 28
 
 VK_F8 = 0x77
 WH_KEYBOARD_LL = 13
@@ -207,9 +207,14 @@ class CoachDesktop:
         self._width = width
         self._expanded_height = height
         self._collapsed = False
+        self._compact_mode = False
         self._last_data: dict[str, Any] = {}
         self._drag_start_x = 0
         self._drag_start_y = 0
+        self._resize_start_x = 0
+        self._resize_start_y = 0
+        self._resize_orig_w = width
+        self._resize_orig_h = height
 
         self.visible = True
         self._hint_visible = False
@@ -302,6 +307,42 @@ class CoachDesktop:
         new_y = event.y_root - self._drag_start_y
         self.root.geometry(f"+{new_x}+{new_y}")
 
+    def _start_resize(self, event: tk.Event) -> None:
+        self._resize_start_x = event.x_root
+        self._resize_start_y = event.y_root
+        self._resize_orig_w = self.root.winfo_width()
+        self._resize_orig_h = self.root.winfo_height()
+
+    def _do_resize(self, event: tk.Event) -> None:
+        if self._collapsed:
+            return
+        dx = event.x_root - self._resize_start_x
+        dy = event.y_root - self._resize_start_y
+        new_w = max(MIN_W, self._resize_orig_w + dx)
+        new_h = max(MIN_H, self._resize_orig_h + dy)
+        self._width = new_w
+        self._expanded_height = new_h
+        cur_x = self.root.winfo_x()
+        cur_y = self.root.winfo_y()
+        self.root.geometry(f"{new_w}x{new_h}+{cur_x}+{cur_y}")
+
+    def toggle_compact_size(self) -> None:
+        """Переключает размер окна: стандартный (310x340) <-> ультракомпактный (250x240)."""
+        if self._collapsed:
+            self.toggle_collapse()
+        self._compact_mode = not self._compact_mode
+        cur_x = self.root.winfo_x()
+        cur_y = self.root.winfo_y()
+        if self._compact_mode:
+            target_w, target_h = 250, 240
+            self.btn_size.configure(text="⤢", fg=GOLD)
+        else:
+            target_w, target_h = DEFAULT_W, DEFAULT_H
+            self.btn_size.configure(text="⤢", fg=MUTED)
+        self._width = target_w
+        self._expanded_height = target_h
+        self.root.geometry(f"{target_w}x{target_h}+{cur_x}+{cur_y}")
+
     def toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
         cur_x = self.root.winfo_x()
@@ -316,7 +357,7 @@ class CoachDesktop:
             self.title_extra.configure(text="")
             self._content_frame.pack(fill="both", expand=True)
             self.btn_collapse.configure(text="—")
-            target_h = max(240, self._expanded_height)
+            target_h = max(MIN_H, self._expanded_height)
             self.root.geometry(f"{cur_w}x{target_h}+{cur_x}+{cur_y}")
 
     def _update_collapsed_title(self, data: dict[str, Any] | None = None) -> None:
@@ -377,6 +418,17 @@ class CoachDesktop:
 
         title_right = tk.Frame(self.title_bar, bg=TITLE_BG)
         title_right.pack(side="right")
+
+        self.btn_size = self._header_btn(
+            title_right,
+            text="⤢",
+            command=self.toggle_compact_size,
+            hover_bg="#252b3b",
+            hover_fg="#ffffff",
+            normal_bg=TITLE_BG,
+            normal_fg=MUTED,
+        )
+        self.btn_size.pack(side="left")
 
         self.btn_collapse = self._header_btn(
             title_right,
@@ -483,10 +535,28 @@ class CoachDesktop:
         self.hint_instead = self._label(self.hint, text="", bg=HINT_BG, fg=OK, font=(FONT, 8, "bold"), wraplength=300)
         self.hint_instead.pack(anchor="w", padx=8, pady=(2, 4))
 
-        # Подвал
-        self.foot = self._label(self._content_frame, text="F8 — скрыть · ЛКМ — перетащить", fg=MUTED, font=(FONT, 7), anchor="center")
-        self.foot.pack(fill="x", pady=(2, 4))
+        # Подвал с подсказкой и resize-грипом
+        footer_frame = tk.Frame(self._content_frame, bg=BG)
+        footer_frame.pack(fill="x", side="bottom", pady=(0, 2))
+
+        self.foot = self._label(footer_frame, text="F8 — скрыть · ЛКМ — перетащить", fg=MUTED, font=(FONT, 7), anchor="center")
+        self.foot.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self._make_draggable(self.foot)
+
+        self.resize_grip = tk.Label(
+            footer_frame,
+            text="◢",
+            fg=MUTED,
+            bg=BG,
+            font=(FONT, 8),
+            cursor="size_nw_se",
+            anchor="se",
+        )
+        self.resize_grip.pack(side="right", padx=(0, 4))
+        self.resize_grip.bind("<Button-1>", self._start_resize)
+        self.resize_grip.bind("<B1-Motion>", self._do_resize)
+        self.resize_grip.bind("<Enter>", lambda _e: self.resize_grip.configure(fg=GOLD))
+        self.resize_grip.bind("<Leave>", lambda _e: self.resize_grip.configure(fg=MUTED))
 
         self.root.bind("<Configure>", self._on_resize)
 

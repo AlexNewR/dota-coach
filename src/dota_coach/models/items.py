@@ -22,6 +22,7 @@ from dota_coach.constants import (
     LATE_LUXURY_ITEMS,
     MID_SKIP_ITEMS,
     can_free_inventory_slot,
+    is_base_component_superseded,
     is_finished_item,
     is_upgrade_of_owned,
     item_allowed_for_hero,
@@ -31,6 +32,7 @@ from dota_coach.constants import (
     normalize_item_name,
     owned_boots,
     preferred_boots_for_hero,
+    resolve_upgrade_prerequisite,
 )
 from dota_coach.gsi.normalize import GameState
 
@@ -336,9 +338,27 @@ def _inventory_used(state: GameState, owned: set[str]) -> int:
     return min(len(counted), INVENTORY_SLOT_LIMIT)
 
 
-def _should_recommend(name: str, state: GameState, owned: set[str]) -> bool:
+def _should_recommend(
+    name: str,
+    state: GameState,
+    owned: set[str],
+    sold_items: set[str] | None = None,
+) -> bool:
     key = normalize_item_name(name)
     if not key or key in owned:
+        return False
+    # Если предмет уже улучшен (напр. есть Spirit Vessel), базовый предмет (Urn) не рекомендуем
+    if is_base_component_superseded(key, owned):
+        return False
+    # Если игрок уже продал этот предмет (напр. Magic Wand), больше его не предлагаем
+    if sold_items and key in sold_items:
+        return False
+    # Проверка поглощенных предметов
+    if (getattr(state, "scepter_consumed", False) or getattr(state, "has_scepter", False)) and key == "ultimate_scepter":
+        return False
+    if getattr(state, "has_shard", False) and key == "aghanims_shard":
+        return False
+    if getattr(state, "moon_shard_consumed", False) and key == "moon_shard":
         return False
     if not is_finished_item(key) or not item_allowed_for_hero(state.hero_id, key):
         return False
@@ -357,8 +377,6 @@ def _should_recommend(name: str, state: GameState, owned: set[str]) -> bool:
     if key in BOOT_ITEMS:
         if boots:
             return key == "travel_boots_2" and "travel_boots" in boots
-        # Первые ботинки — всегда ок (можно продать мусор / переставить слоты).
-        # Раньше slots>=5 блокировал PT у ES с bottle+wand+urn.
         if state.minute >= BOOT_LATE_MINUTE and key not in {"travel_boots", "travel_boots_2"}:
             return False
     if slots >= INVENTORY_SLOT_LIMIT and item_takes_inventory_slot(key):
@@ -373,14 +391,15 @@ def ensure_early_boots(
     pairs: list[tuple[str, float | None]],
     state: GameState,
     top_k: int = 3,
+    sold_items: set[str] | None = None,
 ) -> list[tuple[str, float | None]]:
-    """Если нет ботинок — preferred boots всегда первыми в ранней рекомендации."""
+    """Если нет ботинок — preferred boots подмешиваются в раннюю рекомендацию."""
     owned = {normalize_item_name(item) for item in state.items}
     owned.discard("")
     if owned_boots(owned) or state.minute >= BOOT_LATE_MINUTE:
         return pairs[:top_k]
     preferred = preferred_boots_for_hero(state.hero_id)
-    if not _should_recommend(preferred, state, owned):
+    if not _should_recommend(preferred, state, owned, sold_items=sold_items):
         return pairs[:top_k]
     rest = [(n, p) for n, p in pairs if normalize_item_name(n) != preferred]
     existing = next(((n, p) for n, p in pairs if normalize_item_name(n) == preferred), None)
@@ -390,6 +409,11 @@ def ensure_early_boots(
         boot_pair = (preferred, None)
         if pairs and pairs[0][1] is not None:
             boot_pair = (preferred, max(0.12, float(pairs[0][1])))
+
+    # Для дорогих Boots of Travel (2000g) в первые 3-4 минуты не вытесняем стартовые расходники со слота #1
+    if preferred in {"travel_boots", "travel_boots_2"} and state.minute < 4 and rest:
+        return [rest[0], boot_pair, *rest[1:]][:top_k]
+
     return [boot_pair, *rest][:top_k]
 
 
@@ -398,7 +422,13 @@ class ItemModel:
         self.mlp = mlp
         self.vocab = vocab
 
-    def recommend(self, state: GameState, role: int = DEFAULT_LANE_ROLE, top_k: int = 3) -> list[tuple[str, float]]:
+    def recommend(
+        self,
+        state: GameState,
+        role: int = DEFAULT_LANE_ROLE,
+        top_k: int = 3,
+        sold_items: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
         if state.hero_id not in DEFAULT_HERO_IDS:
             return []
         # Выравниваем с gold_t из обучающей выборки: общее заработанное золото / networth.
@@ -427,14 +457,21 @@ class ItemModel:
         probs = self.mlp.predict_proba(x)[0]
         owned = {normalize_item_name(item) for item in state.items}
         ranked: list[tuple[str, float]] = []
+        seen_names: set[str] = set()
         for idx in np.argsort(probs)[::-1]:
-            name = self.vocab.names[int(idx)]
-            if not _should_recommend(name, state, owned):
+            raw_name = self.vocab.names[int(idx)]
+            # Разрешаем апгрейды до базового предмета, если базы еще нет в инвентаре
+            name = resolve_upgrade_prerequisite(raw_name, owned, minute=state.minute)
+            if not _should_recommend(name, state, owned, sold_items=sold_items):
                 continue
+            norm = normalize_item_name(name)
+            if norm in seen_names:
+                continue
+            seen_names.add(norm)
             ranked.append((name, float(probs[int(idx)])))
             if len(ranked) >= top_k:
                 break
-        return ensure_early_boots(ranked, state, top_k=top_k)  # type: ignore[return-value]
+        return ensure_early_boots(ranked, state, top_k=top_k, sold_items=sold_items)  # type: ignore[return-value]
 
 
 def train_item_model(rows: list[dict[str, Any]]) -> tuple[ItemModel, dict[str, Any]]:

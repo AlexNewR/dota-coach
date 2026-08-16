@@ -340,15 +340,87 @@ ITEM_UPGRADES: dict[str, str] = {
 INVENTORY_SLOT_LIMIT = 6
 BOOT_LATE_MINUTE = 18
 
+# Компоненты улучшений: если у игрока есть апгрейд (ключ),
+# все базовые предметы (значение) считаются уже купленными / поглощенными апгрейдом.
+UPGRADE_COMPONENTS: dict[str, set[str]] = {
+    "silver_edge": {"invis_sword"},
+    "spirit_vessel": {"urn_of_shadows"},
+    "mjollnir": {"maelstrom"},
+    "bloodthorn": {"orchid", "mage_slayer"},
+    "abyssal_blade": {"basher"},
+    "disperser": {"diffusal_blade"},
+    "hurricane_pike": {"force_staff", "dragon_lance"},
+    "wind_waker": {"cyclone"},
+    "harpoon": {"echo_sabre"},
+    "guardian_greaves": {"mekansm", "arcane_boots"},
+    "solar_crest": {"pavise"},
+    "travel_boots_2": {"travel_boots"},
+    "travel_boots": {"boots"},
+    "power_treads": {"boots"},
+    "phase_boots": {"boots"},
+    "tranquil_boots": {"boots"},
+    "boots_of_bearing": {"tranquil_boots", "drums", "boots"},
+    "kaya_and_sange": {"kaya", "sange"},
+    "sange_and_yasha": {"sange", "yasha"},
+    "yasha_and_kaya": {"yasha", "kaya"},
+    "overwhelming_blink": {"blink"},
+    "swift_blink": {"blink"},
+    "arcane_blink": {"blink"},
+    "helm_of_the_overlord": {"helm_of_the_dominator", "vladmir"},
+    "gleipnir": {"rod_of_atos", "maelstrom"},
+    "khanda": {"phylactery", "crystalys"},
+    "parasma": {"witch_blade"},
+}
+
+# Прямое требование базы: если игрок хочет апгрейд (ключ), но базы (значение) нет,
+# советуем сначала базу.
+UPGRADE_PREREQUISITES: dict[str, str] = {
+    "silver_edge": "invis_sword",
+    "spirit_vessel": "urn_of_shadows",
+    "mjollnir": "maelstrom",
+    "bloodthorn": "orchid",
+    "abyssal_blade": "basher",
+    "disperser": "diffusal_blade",
+    "wind_waker": "cyclone",
+    "harpoon": "echo_sabre",
+    "guardian_greaves": "mekansm",
+    "solar_crest": "pavise",
+    "travel_boots_2": "travel_boots",
+    "gleipnir": "rod_of_atos",
+    "khanda": "phylactery",
+    "parasma": "witch_blade",
+    "overwhelming_blink": "blink",
+    "swift_blink": "blink",
+    "arcane_blink": "blink",
+}
+
 # Ранний мусор / слабые слоты: в лейте продаём, чтобы влез новый айтем.
 EARLY_SELL_ITEMS: tuple[str, ...] = (
     "magic_wand",
+    "magic_stick",
     "null_talisman",
     "bracer",
     "wraith_band",
     "orb_of_corrosion",
     "soul_ring",
+    "bottle",
 )
+
+# Предметы, которые покупаются строго на линии / в ранней игре.
+# В мид/лейте (или при наличии готовых слотов) их никогда не рекомендуем.
+EARLY_ONLY_ITEMS: dict[str, int] = {
+    "magic_wand": 8,
+    "magic_stick": 6,
+    "null_talisman": 8,
+    "bracer": 8,
+    "wraith_band": 8,
+    "soul_ring": 10,
+    "orb_of_corrosion": 12,
+    "bottle": 10,
+    "orb_of_venom": 8,
+    "blight_stone": 10,
+    "infused_raindrop": 14,
+}
 
 # Предпочтительные ботинки на миде (пока нет своей пары).
 HERO_PREFERRED_BOOTS: dict[int, str] = {
@@ -369,7 +441,7 @@ MID_SKIP_ITEMS: frozenset[str] = frozenset(
     }
 )
 
-# Саппорт-слоты, которые D2PT тащит в общую таблицу Io. На миде их не советуем.
+# Профильные бан-листы: отсекают чуждые архетипы (напр. кэрри-предметы магам или кастер-предметы мишке).
 HERO_SKIP_ITEMS: dict[int, set[str]] = {
     80: {
         # Caster-luxury с KotL/Io/ES — в OpenDota mid-LD их нет, NN иначе тащит кросс-героем.
@@ -388,6 +460,49 @@ HERO_SKIP_ITEMS: dict[int, set[str]] = {
         "cyclone",
         "wind_waker",
     },
+    90: {
+        # Keeper of the Light: кастер-мидер — физические автоатакерские / кэрри предметы запрещены.
+        "silver_edge",
+        "invis_sword",
+        "desolator",
+        "satanic",
+        "butterfly",
+        "monkey_king_bar",
+        "greater_crit",
+        "lesser_crit",
+        "abyssal_blade",
+        "basher",
+        "diffusal_blade",
+        "disperser",
+        "harpoon",
+        "echo_sabre",
+        "armlet",
+        "battlefury",
+        "mask_of_madness",
+        "skadi",
+        "sange_and_yasha",
+        "manta",
+        "yasha",
+        "mage_slayer",
+        "phylactery",
+        "khanda",
+        "radiance",
+        "dragon_lance",
+        "assault",
+        "heavens_halberd",
+        "maelstrom",
+        "mjollnir",
+        "nullifier",
+        "holy_locket",
+        "guardian_greaves",
+        "mekansm",
+        "pavise",
+        "solar_crest",
+        "pipe",
+        "vladmir",
+        "arcane_boots",
+        "tranquil_boots",
+    },
     91: {
         "urn_of_shadows",
         "spirit_vessel",
@@ -401,6 +516,25 @@ HERO_SKIP_ITEMS: dict[int, set[str]] = {
         "pipe",
         "vladmir",
         "glimmer_cape",
+        "arcane_boots",
+    },
+    107: {
+        # Earth Spirit: силовик-инициатор — исключаем физический кэрри мусор и саппорт-обувь.
+        "desolator",
+        "butterfly",
+        "greater_crit",
+        "lesser_crit",
+        "mask_of_madness",
+        "battlefury",
+        "bloodstone",
+        "ethereal_blade",
+        "arcane_boots",
+        "tranquil_boots",
+        "holy_locket",
+        "diffusal_blade",
+        "disperser",
+        "silver_edge",
+        "invis_sword",
     },
 }
 
@@ -445,17 +579,24 @@ def normalize_item_name(raw: str | None) -> str:
     aliases = {
         "invis_sword": "invis_sword",
         "shadow_blade": "invis_sword",
+        "sb": "invis_sword",
+        "silver": "silver_edge",
         "ultimate_scepter_2": "ultimate_scepter",
         "ultimate_scepter_roshan": "ultimate_scepter",
         "aghanims_scepter": "ultimate_scepter",
-        "ghost_scepter": "ghost",
-        "euls_scepter": "cyclone",
-        "eul": "cyclone",
-        "sheep": "sheepstick",
-        "bkb": "black_king_bar",
         "aghs": "ultimate_scepter",
         "shard": "aghanims_shard",
+        "ghost_scepter": "ghost",
+        "euls_scepter": "cyclone",
+        "euls": "cyclone",
+        "eul": "cyclone",
+        "sheep": "sheepstick",
+        "vyse": "sheepstick",
+        "scythe": "sheepstick",
+        "scythe_of_vyse": "sheepstick",
+        "bkb": "black_king_bar",
         "vessel": "spirit_vessel",
+        "urn": "urn_of_shadows",
         "greaves": "guardian_greaves",
         "travels": "travel_boots",
         "boots_of_travel": "travel_boots",
@@ -464,6 +605,17 @@ def normalize_item_name(raw: str | None) -> str:
         "arcanes": "arcane_boots",
         "mana_boots": "arcane_boots",
         "wand": "magic_wand",
+        "stick": "magic_stick",
+        "null": "null_talisman",
+        "wraith": "wraith_band",
+        "daedalus": "greater_crit",
+        "crit": "greater_crit",
+        "crystalys": "lesser_crit",
+        "crystalis": "lesser_crit",
+        "deso": "desolator",
+        "cuirass": "assault",
+        "ac": "assault",
+        "octarine": "octarine_core",
     }
     return aliases.get(name, name)
 
@@ -496,6 +648,30 @@ def is_upgrade_of_owned(name: str, owned: set[str]) -> bool:
     return False
 
 
+def is_base_component_superseded(name: str, owned: set[str]) -> bool:
+    """Если у игрока уже есть улучшенная версия предмета (напр. spirit_vessel или silver_edge),
+    базовый предмет (urn_of_shadows или invis_sword) считается уже купленным/улучшенным и не рекомендуется."""
+    key = normalize_item_name(name)
+    have = {normalize_item_name(item) for item in owned}
+    have.discard("")
+    for upgrade, bases in UPGRADE_COMPONENTS.items():
+        if key in bases and upgrade in have:
+            return True
+    return False
+
+
+def resolve_upgrade_prerequisite(name: str, owned: set[str], minute: int = 0) -> str:
+    """Если предложен апгрейд (напр. silver_edge или wind_waker), но у игрока ещё нет
+    базового предмета (invis_sword или cyclone), рекомендуем сначала базовый предмет."""
+    key = normalize_item_name(name)
+    have = {normalize_item_name(item) for item in owned}
+    have.discard("")
+    prereq = UPGRADE_PREREQUISITES.get(key)
+    if prereq and prereq not in have:
+        return prereq
+    return key
+
+
 def major_item_count(owned: set[str] | list[str]) -> int:
     total = 0
     for raw in owned:
@@ -510,7 +686,7 @@ def major_item_count(owned: set[str] | list[str]) -> int:
 
 
 def item_timing_ok(name: str, minute: int, owned: set[str] | list[str]) -> bool:
-    """Блокирует late luxury слишком рано / при пустом билде (все герои)."""
+    """Блокирует late luxury слишком рано / early trash слишком поздно (все герои)."""
     key = normalize_item_name(name)
     if not key:
         return False
@@ -519,6 +695,14 @@ def item_timing_ok(name: str, minute: int, owned: set[str] | list[str]) -> bool:
     if is_upgrade_of_owned(key, have):
         return True
     majors = major_item_count(have)
+
+    # 1. Проверка раннего мусора: не советовать стики/нули/брейсеры после тайминга или при наличии мейджоров
+    max_minute = EARLY_ONLY_ITEMS.get(key)
+    if max_minute is not None:
+        if minute > max_minute or majors >= 1:
+            return False
+
+    # 2. Проверка лейт-люксури: не советовать до тайминга
     min_minute = LATE_LUXURY_ITEMS.get(key)
     if min_minute is not None:
         if minute < min_minute and majors < 2:
