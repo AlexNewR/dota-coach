@@ -43,6 +43,14 @@ def get_json(path: str, extra: dict[str, Any] | None = None) -> Any:
             with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=True) as client:
                 response = client.get(url)
                 if response.status_code == 429:
+                    body = (response.text or "").lower()
+                    # Дневной лимит не лечится backoff'ом — сразу наружу для Parse/cache.
+                    if "daily" in body or "limit exceeded" in body:
+                        raise httpx.HTTPStatusError(
+                            "OpenDota daily api limit exceeded",
+                            request=response.request,
+                            response=response,
+                        )
                     wait = min(wait_cap, base_wait * (2**attempt))
                     print(f"OpenDota 429, sleep {wait}s…", flush=True)
                     time.sleep(wait)
@@ -51,6 +59,8 @@ def get_json(path: str, extra: dict[str, Any] | None = None) -> Any:
                 return response.json()
         except httpx.HTTPError as exc:
             last_err = exc
+            if "daily api limit" in str(exc).lower():
+                raise
             time.sleep(OPENDOTA_REQUEST_GAP * (attempt + 2))
     if last_err:
         raise last_err
@@ -59,6 +69,34 @@ def get_json(path: str, extra: dict[str, Any] | None = None) -> Any:
 def _gap(multiplier: float = 1.0) -> None:
     base = OPENDOTA_REQUEST_GAP if OPENDOTA_API_KEY else max(1.8, OPENDOTA_REQUEST_GAP * 1.6)
     time.sleep(base * multiplier)
+
+
+def _unwrap_parse_payload(payload: Any) -> Any:
+    """Parse wraps OpenDota as {status, data: ...} sometimes nested twice."""
+    cur: Any = payload
+    for _ in range(4):
+        if not isinstance(cur, dict):
+            return cur
+        if "rows" in cur or "match_id" in cur or "players" in cur:
+            return cur
+        nxt = cur.get("data")
+        if nxt is None:
+            return cur
+        cur = nxt
+    return cur
+
+
+def parse_opendota_get(endpoint_name: str, params: dict[str, Any] | None = None) -> Any:
+    """Вызов подписки Parse на OpenDota (обход локального daily limit)."""
+    if not PARSE_API_KEY or not OPENDOTA_PARSE_SCRAPER_ID:
+        raise RuntimeError("PARSE_API_KEY / OPENDOTA_PARSE_SCRAPER_ID not configured")
+    url = f"{PARSE_API_BASE.rstrip('/')}/scraper/{OPENDOTA_PARSE_SCRAPER_ID}/{endpoint_name}"
+    headers = {"X-API-Key": PARSE_API_KEY, "Accept": "application/json"}
+    with httpx.Client(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=True) as client:
+        response = client.get(url, params=params or {}, headers=headers)
+        response.raise_for_status()
+        return _unwrap_parse_payload(response.json())
+
 
 def min_start_time(max_age_days: int | None = None) -> int:
     days = OPENDOTA_MAX_AGE_DAYS if max_age_days is None else max_age_days
@@ -262,6 +300,15 @@ def fetch_match(match_id: int, use_cache: bool = True, retries: int = 3) -> dict
         cached = _cached_match(match_id)
         if cached is not None:
             return cached
+    prefer_parse = bool(PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not OPENDOTA_API_KEY)
+    if prefer_parse:
+        try:
+            match = parse_opendota_get("get_match", {"match_id": int(match_id)})
+            if isinstance(match, dict) and match.get("match_id"):
+                _save_match(match_id, match)
+                return match
+        except Exception as exc:  # noqa: BLE001
+            print(f"OpenDota Parse get_match {match_id} failed: {exc}", flush=True)
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
@@ -272,16 +319,43 @@ def fetch_match(match_id: int, use_cache: bool = True, retries: int = 3) -> dict
             return None
         except httpx.HTTPError as exc:
             last_err = exc
+            if "daily api limit" in str(exc).lower():
+                break
             time.sleep(OPENDOTA_REQUEST_GAP * (attempt + 2))
+    if PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not prefer_parse:
+        try:
+            match = parse_opendota_get("get_match", {"match_id": int(match_id)})
+            if isinstance(match, dict) and match.get("match_id"):
+                _save_match(match_id, match)
+                return match
+        except Exception as exc:  # noqa: BLE001
+            print(f"OpenDota Parse get_match {match_id} failed: {exc}", flush=True)
     _ = last_err
     return None
 
 def _explorer_rows(sql: str) -> list[dict[str, Any]]:
+    # Без ключа OpenDota почти всегда daily-limit — сразу Parse, если есть.
+    prefer_parse = bool(PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not OPENDOTA_API_KEY)
+    if prefer_parse:
+        try:
+            payload = parse_opendota_get("get_explorer", {"sql": sql})
+            if isinstance(payload, dict):
+                return list(payload.get("rows") or [])
+        except Exception as exc:  # noqa: BLE001
+            print(f"OpenDota Parse explorer failed: {exc}", flush=True)
     try:
         payload = get_json("/explorer", {"sql": sql})
+        return list((payload or {}).get("rows") or [])
     except httpx.HTTPError:
-        return []
-    return list((payload or {}).get("rows") or [])
+        pass
+    if PARSE_API_KEY and OPENDOTA_PARSE_SCRAPER_ID and not prefer_parse:
+        try:
+            payload = parse_opendota_get("get_explorer", {"sql": sql})
+            if isinstance(payload, dict):
+                return list(payload.get("rows") or [])
+        except Exception as exc:  # noqa: BLE001
+            print(f"OpenDota Parse explorer failed: {exc}", flush=True)
+    return []
 
 def _hero_match_ids_explorer_mid(hero_id: int, limit: int, since: int, lane_role: int) -> list[int]:
     """Про/parsed mid-матчи героя через explorer."""
